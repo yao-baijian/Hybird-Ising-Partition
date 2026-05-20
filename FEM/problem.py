@@ -62,6 +62,11 @@ def expected_bmincut(J,p):
     config is the configuration for n variables, with shape [batch, N,q]
     return TWICE the expected cut size, i.e. outer weights. 
     """
+    if J.is_sparse:
+        batch, N, q = p.shape
+        p_reshaped = p.permute(1, 0, 2).reshape(N, -1)
+        J_p = (J @ p_reshaped).reshape(N, batch, q).permute(1, 0, 2)
+        return (J_p * (1 - p)).sum((1, 2))
     return ((J @ p) * (1-p)).sum((1, 2))
 
 def manual_grad_bmincut(J, p, imba, node_weights=None):
@@ -71,7 +76,15 @@ def manual_grad_bmincut(J, p, imba, node_weights=None):
     else:
         weights = _prepare_node_weights(node_weights, p)
         imbalance_grad = 2 * weights * ((weights * p).sum(1, keepdim=True) - weights * p)
-    tp = J @ temp + imba * imbalance_grad
+        
+    if J.is_sparse:
+        batch_size, num_nodes, q = temp.shape
+        temp_reshaped = temp.permute(1, 0, 2).reshape(num_nodes, -1)
+        J_temp = (J @ temp_reshaped).reshape(num_nodes, batch_size, q).permute(1, 0, 2)
+        tp = J_temp + imba * imbalance_grad
+    else:
+        tp = J @ temp + imba * imbalance_grad
+        
     h_grad = (tp  - (tp * p).sum(2,keepdim=True).expand(tp.shape))*p
     return h_grad
 

@@ -1,21 +1,8 @@
 # FEM
 
-`FEM` is a python library for solving various combinatorial optimization problems
-using gradient based mean-field annealing. The current build-in problem types are:
-* maximum cut
-* balance minimum cut
-* maximum k-satisfactory
-* vertex cover
-* qubo-like instances
-Some examples can be found on [example notebook](examples/build_in.ipynb).
-
-You can also use `FEM` to solve your own optimization problems as long as 
-the expectation value of the target function can be written as some function of 
-the marginal probability. Please refer to the [customize examples](examples/customize.ipynb) 
-for further details.
-
-You can run the jupyter notebooks in [benchmarks](/benchmarks) to reproduce the main results presented in the paper.
-
+`fem-partition` is a python library for solving graph partition problems using `FEM` framework. The current build-in problem types are:
+* normal graph balance minimum cut
+* hypergraph balance minimum cut
 
 ## Installation
 
@@ -30,20 +17,3 @@ You can run the jupyter notebooks in [benchmarks](/benchmarks) to reproduce the 
     pip3 install torch torchvision torchaudio
     ```
     see the [pytorch website](https://pytorch.org/) for more details.
-
-3. `rapidwright` can be installed manually with 
-
-    ```bash
-    pip install rapidwright
-    ```
-
-    see the [rapidwright website](https://www.rapidwright.io/docs/Install_RapidWright_as_a_Python_PIP_Package.html) for more details.
-
-
-## Placement run
-
-To run FPGA placement, there has to be `VIVADO` installed. Because `rapidwright` needs to call `VIVADO` for design file unpack
-
-Basic of FPGA, see https://www.rapidwright.io/docs/FPGA_Architecture.html
-
-Basic of FPGA placement, see https://www.rapidwright.io/docs/Xilinx_Architecture.html

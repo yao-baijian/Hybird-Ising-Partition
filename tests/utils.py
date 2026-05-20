@@ -195,3 +195,186 @@ def expand_coarse_labels(coarse_groups: list, coarse_labels: np.ndarray, num_nod
         for member in members:
             labels[member] = coarse_labels[coarse_node]
     return labels
+
+class PUBOObjective:
+    def __init__(self, hyperedges, hyperedge_weights, q, num_nodes, node_weights, imbalance_weight=5.0, obj_type='cut_net', max_degree=5):
+        import torch
+        from FEM.problem import weighted_imbalance_penalty
+        self.groups = {}
+        for size in range(2, max_degree + 1):
+            self.groups[size] = {'indices': [], 'weights': []}
+            
+        large_he = []
+        large_weights = []
+        # Calculate degrees
+        node_degrees = np.ones(num_nodes, dtype=np.float32) # Add 1 to avoid div by zero
+        for he, w in zip(hyperedges, hyperedge_weights):
+            for v in he:
+                if v < num_nodes:
+                    node_degrees[v] += w
+
+            if len(he) <= max_degree:
+                self.groups[len(he)]['indices'].append(he)
+                self.groups[len(he)]['weights'].append(w)
+            else:
+                large_he.append(he)
+                large_weights.append(w)
+                
+        self.tensors_by_size = {}
+        for size, data in self.groups.items():
+            if data['indices']:
+                self.tensors_by_size[size] = {
+                    'idx': torch.tensor(data['indices'], dtype=torch.long),
+                    'weight': torch.tensor(data['weights'], dtype=torch.float32)
+                }
+                
+        if large_he:
+            clique_J = build_clique_expanded_graph(large_he, num_nodes=num_nodes, normalize_weight=True)
+            self.clique_J = clique_J.to_dense()
+        else:
+            self.clique_J = None
+            
+        self.node_weights = torch.tensor(node_weights, dtype=torch.float32) if node_weights is not None else torch.ones(num_nodes)
+        self.node_degrees = torch.tensor(node_degrees, dtype=torch.float32)
+        self.imbalance_weight = imbalance_weight
+        self.obj_type = obj_type
+        self.weighted_imbalance_penalty = weighted_imbalance_penalty
+        self.q = q
+        
+    def to(self, dev):
+        for size in self.tensors_by_size:
+            self.tensors_by_size[size]['idx'] = self.tensors_by_size[size]['idx'].to(dev)
+            self.tensors_by_size[size]['weight'] = self.tensors_by_size[size]['weight'].to(dev)
+        if self.clique_J is not None:
+            self.clique_J = self.clique_J.to(dev)
+        self.node_weights = self.node_weights.to(dev)
+        self.node_degrees = self.node_degrees.to(dev)
+
+    def expectation(self, _, p):
+        # Optional: gradient scaling & clipping hook on p
+        if p.requires_grad and not hasattr(p, 'pubo_hook_registered'):
+            def scale_and_clip(grad):
+                # Node degree normalization
+                g = grad / self.node_degrees.view(1, -1, 1)
+                # Gradient clipping
+                g = torch.clamp(g, -5.0, 5.0)
+                return g
+            p.register_hook(scale_and_clip)
+            p.pubo_hook_registered = True
+
+        dev = p.device
+        self.to(dev)
+        
+        loss = 0.0
+        
+        for size, t in self.tensors_by_size.items():
+            idx = t['idx'] 
+            weight = t['weight'] 
+            
+            p_e = p[:, idx, :] 
+            
+            if self.obj_type == 'cut_net':
+                prod = p_e.prod(dim=2) 
+                sum_prod = prod.sum(dim=2) 
+                term = weight * (1.0 - sum_prod)
+                loss = loss + term.sum(dim=1)
+            elif self.obj_type == 'km1':
+                prod = (1.0 - p_e).prod(dim=2) 
+                sum_term = (1.0 - prod).sum(dim=2) 
+                term = weight * (sum_term - 1.0)
+                loss = loss + term.sum(dim=1)
+                
+        if self.clique_J is not None:
+            clique_loss = ((self.clique_J @ p) * (1 - p)).sum(dim=(1, 2))
+            loss = loss + clique_loss
+            
+        imb_penalty = self.weighted_imbalance_penalty(p, self.node_weights.cpu().numpy())
+        loss = loss + self.imbalance_weight * imb_penalty
+        
+        return loss
+
+    def inference(self, _, p):
+        import torch
+        # Dummy result since we recalculate cut with `evaluate_kahypar_cut_value` anyway. 
+        # But FEM solver needs `config` and `results`.
+        config = torch.zeros_like(p)
+        config.scatter_(2, p.argmax(dim=2, keepdim=True), 1)
+        # return dummy low objective values to allow FEM to just pick the best config based on argmax.
+        dummy_results = torch.zeros(p.shape[0], device=p.device)
+        return config, dummy_results
+
+def greedy_refine_hypergraph(
+    assignment: np.ndarray, 
+    hyperedges: list, 
+    hyperedge_weights: list, 
+    q: int, 
+    max_passes: int = 5,
+    max_imbalance: float = 0.05
+) -> np.ndarray:
+    assignment = assignment.copy()
+    num_nodes = len(assignment)
+    
+    if hyperedge_weights is None:
+        hyperedge_weights = [1.0] * len(hyperedges)
+        
+    he_pins = [np.zeros(q, dtype=np.int32) for _ in range(len(hyperedges))]
+    node_to_he = [[] for _ in range(num_nodes)]
+    
+    for e_idx, he in enumerate(hyperedges):
+        for v in he:
+            if v < num_nodes:
+                he_pins[e_idx][assignment[v]] += 1
+                node_to_he[v].append(e_idx)
+                
+    group_sizes = np.bincount(assignment, minlength=q)
+    ideal_size = num_nodes / float(q)
+    max_size = ideal_size * (1.0 + max_imbalance)
+    
+    for pass_idx in range(max_passes):
+        moved_any = False
+        nodes = np.arange(num_nodes)
+        np.random.shuffle(nodes)
+        
+        for v in nodes:
+            old_group = assignment[v]
+            
+            best_gain = 0.0
+            best_group = old_group
+            
+            for new_group in range(q):
+                if new_group == old_group:
+                    continue
+                    
+                if group_sizes[new_group] + 1 > max_size:
+                    continue
+                    
+                gain = 0.0
+                for e_idx in node_to_he[v]:
+                    pins = he_pins[e_idx]
+                    weight = hyperedge_weights[e_idx]
+                    
+                    if pins[old_group] == 1:
+                        gain += weight
+                        
+                    if pins[new_group] == 0:
+                        gain -= weight
+                        
+                if gain > best_gain:
+                    best_gain = gain
+                    best_group = new_group
+                    
+            if best_group != old_group:
+                assignment[v] = best_group
+                group_sizes[old_group] -= 1
+                group_sizes[best_group] += 1
+                
+                for e_idx in node_to_he[v]:
+                    he_pins[e_idx][old_group] -= 1
+                    he_pins[e_idx][best_group] += 1
+                    
+                moved_any = True
+                
+        if not moved_any:
+            break
+            
+    return assignment

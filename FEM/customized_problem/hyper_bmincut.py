@@ -345,9 +345,13 @@ def expected_hyperbmincut_all_comb(J, p, hyperedges):
         prob_4_clusters = 1 - prob_single_cluster - prob_2_clusters - prob_3_clusters
         
         epsilon = 1e-3
-        prob_2 = torch.log(prob_2_clusters + epsilon)
-        prob_3 = torch.log(prob_3_clusters + epsilon) 
-        prob_4 = torch.log(prob_4_clusters + epsilon)
+        # prob_2 = torch.log(prob_2_clusters + epsilon)
+        # prob_3 = torch.log(prob_3_clusters + epsilon) 
+        # prob_4 = torch.log(prob_4_clusters + epsilon)
+        
+        prob_2 = prob_2_clusters
+        prob_3 = prob_3_clusters
+        prob_4 = prob_4_clusters
 
         # prob_2 = torch.log(torch.sqrt(prob_2_clusters))
         # prob_3 = torch.log(torch.sqrt(prob_3_clusters))
