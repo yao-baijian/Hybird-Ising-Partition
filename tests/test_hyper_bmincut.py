@@ -60,7 +60,7 @@ for instance in instance_list:
                     print(f'{instance}, optimal value {result.min()}')
 
                     group_assignment = best_config.argmax(dim=1).cpu().numpy()
-                    fem_cut_value = evaluate_kahypar_cut_value_simple(group_assignment, hyperedges)
+                    fem_cut_value = evaluate_kahypar_cut_value(group_assignment, hyperedges)
                     group_counts = np.bincount(group_assignment, minlength=q)
 
                     result = {            

@@ -1,7 +1,22 @@
 import torch
 import torch.nn.functional as Func
-from .customized_problem.fpga_placement import *
 from .customized_problem.hyper_bmincut import *
+
+
+def _sparse_square_sum(matrix):
+    if matrix.is_sparse:
+        return matrix.coalesce().values().square().sum()
+    return matrix.square().sum()
+
+
+def _prepare_node_weights(node_weights, p):
+    if node_weights is None:
+        return None
+    if not torch.is_tensor(node_weights):
+        node_weights = torch.tensor(node_weights, dtype=p.dtype, device=p.device)
+    else:
+        node_weights = node_weights.to(device=p.device, dtype=p.dtype)
+    return node_weights.view(1, -1, 1)
 
 def infer_qubo(J, p):
     """
@@ -49,11 +64,24 @@ def expected_bmincut(J,p):
     """
     return ((J @ p) * (1-p)).sum((1, 2))
 
-def manual_grad_bmincut(J, p, imba):
+def manual_grad_bmincut(J, p, imba, node_weights=None):
     temp = 1 - 2 * p
-    tp = J @ temp + imba*(2 * p.sum(1,keepdim=True)- 2*p)
+    if node_weights is None:
+        imbalance_grad = 2 * p.sum(1, keepdim=True) - 2 * p
+    else:
+        weights = _prepare_node_weights(node_weights, p)
+        imbalance_grad = 2 * weights * ((weights * p).sum(1, keepdim=True) - weights * p)
+    tp = J @ temp + imba * imbalance_grad
     h_grad = (tp  - (tp * p).sum(2,keepdim=True).expand(tp.shape))*p
     return h_grad
+
+
+def weighted_imbalance_penalty(p, node_weights):
+    weights = _prepare_node_weights(node_weights, p)
+    if weights is None:
+        return imbalance_penalty(p)
+    weighted_counts = (weights * p).sum(1)
+    return (weighted_counts ** 2).sum(1) - ((weights ** 2) * (p * p)).sum((1, 2))
 
 def infer_maxcut(J, p):
     """
@@ -151,9 +179,8 @@ class OptimizationProblem:
             imbalance_weight=5.0, 
             epsilon=0.03,
             q=2,
-            io_site_connect_matrix=None,
             hyperedge=None,
-            fpga_wrapper=None,
+            node_weights=None,
             discretization=False,
             customize_expected_func=None,
             customize_grad_func=None,
@@ -167,12 +194,7 @@ class OptimizationProblem:
         self.epsilon = epsilon
         self.q = q
         self.hyperedge = hyperedge
-
-# **********************************   Start   *********************************** # 
-        self.fpga_wrapper = fpga_wrapper                                    # rapidwright design object
-        self.io_site_connect_matrix = io_site_connect_matrix                # IO site connectivity matrix
-# **********************************    End    *********************************** # 
-
+        self.node_weights = node_weights
         self.discretization = discretization
         self.constant = 0
         self.customize_expected_func = customize_expected_func
@@ -184,19 +206,13 @@ class OptimizationProblem:
     def extra_preparation(self, num_trials=1, sparse=False):
         if self.problem_type == 'maxcut':
             self.c = 1 / torch.abs(self.coupling_matrix).sum(1)
-        if self.problem_type == 'bmincut':
-            self.w2 = self.coupling_matrix.square().sum()
-            self.imbalance_weight = self.imbalance_weight * self.w2 / (self.num_nodes**2)
-        if self.problem_type == 'hyperbmincut':
-            # TODO improved weight here
-            total_weight = self.coupling_matrix.sum()
-            num_edges = (self.coupling_matrix > 0).float().sum()
-            avg_weight = total_weight / num_edges if num_edges > 0 else 1.0
-            self.imbalance_weight = 0.5
-            # self.imbalance_weight = 0.5 * (avg_weight ** 0.5) * (self.num_nodes ** 0.25)
-            self.U_max = int((1 + self.epsilon) * self.num_nodes / self.q)
-            self.L_min = int((1 - self.epsilon) * self.num_nodes / self.q)
-            print(f"Imbalance weight: {self.imbalance_weight}, U_max: {self.U_max}, L_min: {self.L_min}")
+        if self.problem_type == 'bmincut' or self.problem_type == 'hyperbmincut':
+            self.w2 = _sparse_square_sum(self.coupling_matrix)
+            if self.node_weights is None:
+                balance_mass = float(self.num_nodes)
+            else:
+                balance_mass = float(torch.as_tensor(self.node_weights, dtype=self.coupling_matrix.dtype).sum())
+            self.imbalance_weight = self.imbalance_weight * self.w2 / (balance_mass**2)
         if self.problem_type == 'modularity':
             self.d = self.coupling_matrix.sum(1).reshape([1, self.num_nodes, 1])
             self.m = self.coupling_matrix.sum() / 2
@@ -208,35 +224,23 @@ class OptimizationProblem:
             self.constant = self.num_interactions * self.imbalance_weight
         if self.problem_type == 'maxksat':
             self.coupling_matrix = self.coupling_matrix.repeat(1, num_trials, 1, 1)
-
-# **********************************   Start   *********************************** # 
-        if self.problem_type == 'fpga_placement':                                   # store site coordinates matrix
-            self.net_sites_tensor = self.fpga_wrapper.net_manager.net_tensor      # Net to slice sites mapping tensor
-            self.bbox_length = self.fpga_wrapper.bbox['area_length']          # FPGA layout boundary size 
-            self.site_coords_matrix = get_site_coords_all(self.bbox_length ** 2, self.bbox_length) # All site coordinates matrix
-            self.best_hpwl = torch.full((10,), float('inf'))        # Track best HPWL history
-            return
-# **********************************    End   ************************************ #
-        
         if sparse:
             self.coupling_matrix = self.coupling_matrix.to_sparse()
 
     def set_up_couplings_status(self, dev, dtype):
         self.coupling_matrix = self.coupling_matrix.to(dtype).to(dev)
+        if self.node_weights is not None:
+            self.node_weights = torch.as_tensor(self.node_weights, dtype=dtype, device=dev)
     
     def expectation(self, p, step = 0):
         if self.problem_type == 'maxcut':
             return -expected_cut(self.coupling_matrix/2, p)
         elif self.problem_type == 'bmincut':
             return expected_bmincut(self.coupling_matrix, p) + \
-                self.imbalance_weight * imbalance_penalty(p)
+                self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)
         elif self.problem_type == 'hyperbmincut':
-            # print(f"expected_hyperbmincut: {expected_hyperbmincut(self.coupling_matrix, p)}")
-            # print(f"Balance loss: {self.imbalance_weight * balance_constrain_1(p, self.U_max, self.L_min)}")
-            # factor = (step_max - step )/ step_max
-            # rev_factor = ( step )/ step_max
             expect_loss = expected_hyperbmincut(self.coupling_matrix, p, self.hyperedge)
-            balance_loss = self.imbalance_weight * balance_constrain(self.coupling_matrix, p, self.U_max, self.L_min)
+            balance_loss = self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)
             return expect_loss + balance_loss
         elif self.problem_type == 'modularity':
             return -expected_inner_weight(self.coupling_matrix, p) + \
@@ -244,14 +248,7 @@ class OptimizationProblem:
         elif self.problem_type == 'vertexcover':
             return expected_qubo(self.coupling_matrix, p)
         elif self.problem_type == 'maxksat':
-            return expected_maxksat(self.coupling_matrix, p.unsqueeze(0))
-        
-# **********************************   Start   *********************************** #
-        elif self.problem_type == 'fpga_placement':
-            # return expected_fpga_placement_xy(self.coupling_matrix, p_x=p[0], p_y=p[1])
-            return expected_fpga_placement(self.coupling_matrix, p, self.io_site_connect_matrix, self.site_coords_matrix, self.net_sites_tensor, self.best_hpwl)
-# **********************************    End    *********************************** #
-          
+            return expected_maxksat(self.coupling_matrix, p.unsqueeze(0))  
         elif self.problem_type == 'customize':
             return self.customize_expected_func(self.coupling_matrix, p)
     
@@ -259,7 +256,7 @@ class OptimizationProblem:
         if self.problem_type == 'maxcut':
             return manual_grad_maxcut(self.c * self.coupling_matrix, p, self.discretization)
         elif self.problem_type == 'bmincut':
-            return manual_grad_bmincut(self.coupling_matrix, p, self.imbalance_weight)
+            return manual_grad_bmincut(self.coupling_matrix, p, self.imbalance_weight, self.node_weights)
         elif self.problem_type == 'hyperbmincut':
             return manual_grad_hyperbmincut(self.coupling_matrix, p, self.U_max, self.L_min, self.imbalance_weight)
         elif self.problem_type == 'modularity':
@@ -270,12 +267,6 @@ class OptimizationProblem:
             return manual_grad_qubo(self.coupling_matrix, p)
         elif self.problem_type == 'maxksat':
             return manual_grad_maxksat(self.coupling_matrix, p.unsqueeze(0)).squeeze(0)
-
-# **********************************   Start   *********************************** #
-        elif self.problem_type == 'fpga_placement':
-            return
-# **********************************    END    *********************************** #
-
         elif self.problem_type == 'customize':
             return self.customize_grad_func(self.coupling_matrix, p)
             
@@ -285,21 +276,12 @@ class OptimizationProblem:
             p = torch.vstack([pi for pi in p if torch.isnan(pi).sum() == 0])
         if self.problem_type == 'maxcut':
             config, result = infer_maxcut(self.coupling_matrix, p)
-        elif self.problem_type == 'bmincut':
+        elif self.problem_type == 'bmincut' or self.problem_type == 'hyperbmincut':
             config, result = infer_bmincut(self.coupling_matrix, p)
-        elif self.problem_type == 'hyperbmincut':
-            config, result = infer_hyperbmincut(self.coupling_matrix, p, self.hyperedge)
         elif self.problem_type == 'vertexcover':
             config, result = infer_qubo(self.coupling_matrix, p)
         elif self.problem_type == 'maxksat':
             config, result = infer_maxksat(self.coupling_matrix, p.unsqueeze(0))
-
-# **********************************   Start   *********************************** #
-        elif self.problem_type == 'fpga_placement':
-            # config, result = infer_placements_xy(self.coupling_matrix, p_x=p[0], p_y=p[1])
-            config, result = infer_placements(self.coupling_matrix, p, self.bbox_length, self.site_coords_matrix, self.net_sites_tensor)
-# **********************************    END    *********************************** #
-
         elif self.problem_type == 'customize':
             return self.customize_infer_func(self.coupling_matrix, p)
         result += self.constant

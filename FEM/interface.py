@@ -13,20 +13,6 @@ class FEM:
 
     @classmethod
     def from_file(cls, problem_type, filename, fpga_wrapper, index_start=0, epsilon=0.03, q=2, hyperedges=None, map_type='normal',**args):
-
-# **********************************   START   *********************************** # 
-        if problem_type == 'fpga_placement':
-            J = fpga_wrapper.net_manager.insts_matrix
-            io_site_connect_matrix = fpga_wrapper.net_manager.io_insts_matrix
-            num_inst = len(fpga_wrapper.optimizable_insts)
-            num_site = len(fpga_wrapper.available_sites)
-            fem = cls()
-            fem.set_up_problem(
-                num_inst, num_site, problem_type, J, epsilon=epsilon, io_site_connect_matrix = io_site_connect_matrix, hyperedges=hyperedges, fpga_wrapper = fpga_wrapper, q=q,**args
-            )
-            return fem
-# **********************************    END    *********************************** # 
-        else:
             num_nodes, num_interactions, couplings = parse_file(
                 problem_type, filename, index_start, map_type
             )
@@ -46,12 +32,12 @@ class FEM:
 
     def set_up_problem(
             self, num_nodes, num_interactions, problem_type, coupling_matrix, 
-            imbalance_weight=5.0, epsilon=0.03, q=2, io_site_connect_matrix = None, hyperedges=None, fpga_wrapper = None,
-            discretization=False, customize_expected_func=None, customize_grad_func=None,
+            imbalance_weight=5.0, epsilon=0.03, q=2, hyperedges=None,
+            discretization=False, node_weights=None, customize_expected_func=None, customize_grad_func=None,
             customize_infer_func=None
         ):
         supported_types = [
-            'maxcut', 'bmincut', 'hyperbmincut', 'modularity', 'maxksat', 'vertexcover', 'fpga_placement', 'customize'
+            'maxcut', 'bmincut', 'hyperbmincut', 'modularity', 'maxksat', 'vertexcover', 'customize'
         ]
         if problem_type not in supported_types:
             raise ValueError(
@@ -59,7 +45,7 @@ class FEM:
             )
         self.problem = OptimizationProblem(
             num_nodes, num_interactions, coupling_matrix, 
-            problem_type, imbalance_weight, epsilon, q, io_site_connect_matrix, hyperedges, fpga_wrapper, discretization, 
+            problem_type, imbalance_weight, epsilon, q, hyperedges, node_weights, discretization, 
             customize_expected_func, customize_grad_func, customize_infer_func
         )
 
