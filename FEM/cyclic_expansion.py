@@ -14,6 +14,7 @@ Reference: Algorithm adapted from "2312.15467v1.pdf" (Cyclic Expansion for QUBO)
 
 import numpy as np
 import torch
+import sys
 from typing import List, Tuple, Dict, Optional, Set
 from scipy.sparse import csr_matrix
 
@@ -72,7 +73,8 @@ def select_candidate_pairs(
     adjacency: List[List[Tuple[int, float]]],
     partition: np.ndarray,
     q: int,
-    max_candidates: int = 50
+    max_candidates: int = 50,
+    rng: Optional[np.random.Generator] = None,
 ) -> List[Tuple[int, int]]:
     """Select candidate swap pairs for Cyclic Expansion.
     
@@ -90,8 +92,15 @@ def select_candidate_pairs(
     Returns:
         List of (u, v) tuples representing candidate swap pairs
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     n = len(partition)
     boundary = find_boundary_vertices(adjacency, partition, q)
+
+    # Randomize the boundary order so repeated runs explore different pairs.
+    boundary = list(boundary)
+    rng.shuffle(boundary)
     
     # Score each boundary vertex by its external degree
     vertex_scores = []
@@ -101,6 +110,11 @@ def select_candidate_pairs(
         vertex_scores.append((v, total_ext))
     
     # Sort by external degree (descending)
+    vertex_scores.sort(key=lambda x: -x[1])
+
+    # Break ties randomly so equal-score vertices do not always produce
+    # the same candidate pairs.
+    rng.shuffle(vertex_scores)
     vertex_scores.sort(key=lambda x: -x[1])
     
     # Greedily select disjoint pairs
@@ -116,8 +130,11 @@ def select_candidate_pairs(
         # Find best partner v for u
         best_v = -1
         best_score = -1.0
+
+        neighbors = list(adjacency[u])
+        rng.shuffle(neighbors)
         
-        for j, w in adjacency[u]:
+        for j, w in neighbors:
             if j in used:
                 continue
             if partition[j] == partition[u]:
@@ -460,7 +477,9 @@ def cyclic_expansion_refine(
     num_trials: int = 8,
     num_steps: int = 200,
     dev: str = 'cpu',
-    patience: int = 5
+    patience: int = 5,
+    verbose: bool = False,
+    seed: Optional[int] = None,
 ) -> np.ndarray:
     """Run Cyclic Expansion QUBO refinement on a graph partition.
     
@@ -474,10 +493,12 @@ def cyclic_expansion_refine(
         num_steps: FEM steps
         dev: device for FEM
         patience: iterations without improvement before stopping
+        seed: optional RNG seed for randomized candidate selection
         
     Returns:
         Refined partition assignment
     """
+    rng = np.random.default_rng(seed)
     n = len(partition)
     best_partition = partition.copy()
     
@@ -496,7 +517,7 @@ def cyclic_expansion_refine(
     for iteration in range(max_iterations):
         # Select candidate pairs
         candidate_pairs = select_candidate_pairs(
-            adjacency, best_partition, q, max_candidates
+            adjacency, best_partition, q, max_candidates, rng=rng
         )
         
         if len(candidate_pairs) == 0:
@@ -508,21 +529,39 @@ def cyclic_expansion_refine(
         # Solve QUBO with FEM
         swap_decision = solve_qubo_with_fem(Q, num_trials, num_steps, dev)
         
-        # Apply swaps
+        # Apply swaps and evaluate
         new_partition = apply_swaps(best_partition, candidate_pairs, swap_decision)
-        
-        # Evaluate
         new_cut = compute_cut(adjacency, new_partition)
-        
+
+        if verbose:
+            print(f"CyclicExp iter={iteration} cand={len(candidate_pairs)} new_cut={new_cut} best_cut={best_cut}")
+
+        # Only accept strictly improving partitions. This ensures monotonicity
+        # w.r.t. best_cut — longer `max_iterations` cannot worsen the returned
+        # partition. If we ever observe best_cut increasing, log details.
         if new_cut < best_cut:
             best_cut = new_cut
             best_partition = new_partition
             no_improve_count = 0
         else:
+            # Log non-improving result for diagnostics
+            if verbose:
+                print(
+                    f"CyclicExp: iteration {iteration} produced non-improving partition (new_cut={new_cut} >= best_cut={best_cut})",
+                    file=sys.stderr,
+                )
             no_improve_count += 1
             if no_improve_count >= patience:
                 break
     
+    # Sanity: ensure we return a partition no worse than the initial one
+    final_cut = compute_cut(adjacency, best_partition)
+    if final_cut > best_cut:
+        # This should not happen; fallback to the original input partition
+        if verbose:
+            print(f"CyclicExp: sanity failed final_cut={final_cut} > best_cut={best_cut}; reverting.", file=sys.stderr)
+        return partition.copy()
+
     return best_partition
 
 

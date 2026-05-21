@@ -28,12 +28,12 @@ manual_grad = False
 # 'coarse_fem_refine_metis'   : Multi-level coarsening + FEM coarse opt + METIS fine opt
 # 'coarse_fem_refine_kahypar' : Multi-level coarsening + FEM coarse opt + KaHyPar fine opt
 # 'coarse_fem_refine_kaffpa'  : Multi-level coarsening + FEM coarse opt + KaFFPa fine opt
-# 'coarse_kaffpa_refine_FEM'  : Multi-level coarsening + KaFFPa coarse opt + Cyclic Expansion FEM fine opt
+# 'coarse_kaffpa_refine_fem'  : Multi-level coarsening + KaFFPa coarse opt + Cyclic Expansion FEM fine opt
 # 'metis'                     : PyMetis graph partitioner alone
 # 'kahypar'                   : KaHyPar partitioner alone
 # 'kaffpa'                    : KaFFPa partitioner alone
 # ==========================================
-partition_methods = ['direct_fem', 'kaffpa', 'coarse_fem_refine_kaffpa', 'coarse_kaffpa_refine_FEM']
+partition_methods = ['direct_fem', 'kaffpa', 'coarse_fem_refine_kaffpa', 'coarse_kaffpa_refine_fem']
 
 # normal graph instances
 instance = 'tests/test_instances/G1.txt'
@@ -415,7 +415,7 @@ for partition_method in partition_methods:
         _, fem_eval_cut = infer_bmincut(J, p)
         # suppressed intermediate prints
 
-    elif partition_method == 'coarse_kaffpa_refine_FEM':
+    elif partition_method == 'coarse_kaffpa_refine_fem':
         import kahip
         start_time = time.time()
 
@@ -471,12 +471,13 @@ for partition_method in partition_methods:
             adjacency,
             initial_assignment,
             q,
-            max_iterations=20,
-            max_candidates=50,
+            max_iterations=50,
+            max_candidates=70,
             num_trials=num_trials,
             num_steps=num_steps,
             dev=dev,
-            patience=5
+            patience=10,
+            verbose=False,
         )
 
         # Build output tensor
