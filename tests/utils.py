@@ -386,81 +386,139 @@ def greedy_refine_hypergraph(
 
 def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, arg7=0, arg8=0, part=None, max_passes=10):
     """
-    Simple replacement for kaffpa: perform local greedy refinement (KL/FM-like)
-    starting from `part` (list of length n). Returns (edgecut, part_list).
-    - `vwgt`, `xadj`, `adjcwgt`, `adjncy` follow KaHIP conventions.
-    - `q` number of partitions.
-    - `epsilon` allowed imbalance fraction.
-    - `max_passes` number of refinement passes.
+    Simple replacement for kaffpa: perform FM-style local refinement starting
+    from `part` (list of length n).
+
+    This implementation uses:
+    - a max-heap of candidate single-vertex moves,
+    - lazy gain recomputation,
+    - per-pass locking,
+    - rollback to the best prefix of moves.
+
+    Returns (edgecut, part_list).
     """
+    import heapq
     import numpy as _np
 
     n = len(vwgt)
     if part is None:
-        # balanced random start
         base = _np.arange(n) % q
         _np.random.shuffle(base)
         part = base.tolist()
     else:
-        part = list(part)
+        part = [int(x) for x in part]
 
-    # build neighbor lists with weights
+    # Build symmetric adjacency lists. If the input contains duplicate edges,
+    # we preserve them and aggregate weights when computing gains.
     neighbors = [[] for _ in range(n)]
     for i in range(n):
-        start = xadj[i]
-        end = xadj[i+1]
-        for idx in range(start, end):
-            j = adjncy[idx]
-            w = adjcwgt[idx]
-            neighbors[i].append((j, w))
+        for idx in range(xadj[i], xadj[i + 1]):
+            j = int(adjncy[idx])
+            w = float(adjcwgt[idx])
+            if j != i:
+                neighbors[i].append((j, w))
 
-    counts = _np.bincount(_np.array(part, dtype=int), minlength=q)
-    ideal = n / float(q)
-    max_size = ideal * (1.0 + epsilon)
-
-    def compute_edgecut(parts):
+    def edgecut_of(parts):
         cut = 0.0
         for i in range(n):
+            pi = parts[i]
             for j, w in neighbors[i]:
-                if i < j and parts[i] != parts[j]:
+                if i < j and pi != parts[j]:
                     cut += w
-        return int(cut)
+        return int(round(cut))
+
+    def best_destination(vertex, parts):
+        old = parts[vertex]
+        weight_to = _np.zeros(q, dtype=float)
+        for nbr, w in neighbors[vertex]:
+            weight_to[parts[nbr]] += w
+
+        best_group = old
+        best_delta = 0.0
+        for g in range(q):
+            if g == old:
+                continue
+            # moving v from old -> g changes cut by w_to_old - w_to_g
+            delta = weight_to[old] - weight_to[g]
+            if delta < best_delta:
+                best_delta = delta
+                best_group = g
+        return best_group, float(best_delta)
+
+    def feasible_move(group_sizes, old_group, new_group, max_size):
+        return group_sizes[new_group] + 1 <= max_size
+
+    counts = _np.bincount(_np.asarray(part, dtype=int), minlength=q).astype(int)
+    ideal = n / float(q)
+    max_size = ideal * (1.0 + float(epsilon))
 
     for _pass in range(max_passes):
+        locked = _np.zeros(n, dtype=bool)
+        current_parts = part[:]
+        current_counts = counts.copy()
+        pass_start_cut = edgecut_of(current_parts)
+        current_cut = pass_start_cut
+        best_cut = current_cut
+        best_state = current_parts[:]
+
+        heap = []
+
+        def push_candidate(v):
+            if locked[v]:
+                return
+            g, delta = best_destination(v, current_parts)
+            if g != current_parts[v] and feasible_move(current_counts, current_parts[v], g, max_size):
+                heapq.heappush(heap, (delta, v, g))
+
+        for v in range(n):
+            push_candidate(v)
+
         moved = False
-        order = _np.random.permutation(n)
-        for v in order:
-            old = part[v]
-            # compute weight to each group
-            weight_to = _np.zeros(q, dtype=float)
-            for u, w in neighbors[v]:
-                weight_to[part[u]] += w
+        while heap:
+            delta, v, g = heapq.heappop(heap)
+            if locked[v]:
+                continue
 
-            best_delta = 0.0
-            best_group = old
-            for g in range(q):
-                if g == old:
-                    continue
-                if counts[g] + 1 > max_size:
-                    continue
-                # delta = change_in_cut = sum_w_to_old - sum_w_to_new
-                delta = weight_to[old] - weight_to[g]
-                if delta < best_delta:
-                    best_delta = delta
-                    best_group = g
+            # Recompute lazily; stale entries are ignored.
+            best_g, best_delta = best_destination(v, current_parts)
+            if best_g != g or abs(best_delta - delta) > 1e-12:
+                if best_g != current_parts[v] and feasible_move(current_counts, current_parts[v], best_g, max_size):
+                    heapq.heappush(heap, (best_delta, v, best_g))
+                continue
 
-            if best_group != old:
-                # apply move
-                part[v] = int(best_group)
-                counts[old] -= 1
-                counts[best_group] += 1
-                moved = True
+            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g, max_size):
+                locked[v] = True
+                continue
+
+            old = current_parts[v]
+            current_parts[v] = g
+            current_counts[old] -= 1
+            current_counts[g] += 1
+            locked[v] = True
+            moved = True
+
+            current_cut += int(round(delta))
+            if current_cut < best_cut:
+                best_cut = current_cut
+                best_state = current_parts[:]
+
+            # neighbors may have changed gains; allow them back in the queue
+            for nbr, _w in neighbors[v]:
+                if not locked[nbr]:
+                    push_candidate(nbr)
+            # v is locked already; no need to reinsert
 
         if not moved:
             break
 
-    edgecut = compute_edgecut(part)
-    return int(edgecut), part
+        part = best_state
+        counts = _np.bincount(_np.asarray(part, dtype=int), minlength=q).astype(int)
+
+        # Stop if the pass did not improve over the cut at the start of the pass.
+        if best_cut >= pass_start_cut:
+            break
+
+    return edgecut_of(part), part
 
 
 def call_pymetis_with_part(q, adjacency_list, part=None):

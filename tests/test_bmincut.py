@@ -28,11 +28,12 @@ manual_grad = False
 # 'coarse_fem_refine_metis'   : Multi-level coarsening + FEM coarse opt + METIS fine opt
 # 'coarse_fem_refine_kahypar' : Multi-level coarsening + FEM coarse opt + KaHyPar fine opt
 # 'coarse_fem_refine_kaffpa'  : Multi-level coarsening + FEM coarse opt + KaFFPa fine opt
+# 'coarse_kaffpa_refine_FEM'  : Multi-level coarsening + KaFFPa coarse opt + Cyclic Expansion FEM fine opt
 # 'metis'                     : PyMetis graph partitioner alone
 # 'kahypar'                   : KaHyPar partitioner alone
 # 'kaffpa'                    : KaFFPa partitioner alone
 # ==========================================
-partition_methods = ['direct_fem', 'kaffpa', 'coarse_fem_refine_kaffpa']
+partition_methods = ['direct_fem', 'kaffpa', 'coarse_fem_refine_kaffpa', 'coarse_kaffpa_refine_FEM']
 
 # normal graph instances
 instance = 'tests/test_instances/G1.txt'
@@ -409,10 +410,82 @@ for partition_method in partition_methods:
         p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(part):
             p[0, i, p_group] = 1.0
-            
+
         from FEM.problem import infer_bmincut
         _, fem_eval_cut = infer_bmincut(J, p)
         # suppressed intermediate prints
+
+    elif partition_method == 'coarse_kaffpa_refine_FEM':
+        import kahip
+        start_time = time.time()
+
+        from utils import coarsen_graph_by_matching, expand_coarse_labels
+        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
+
+        J = case_bmincut.problem.coupling_matrix
+        if not J.is_sparse:
+            J = J.to_sparse()
+        J = J.coalesce()
+        n = J.shape[0]
+
+        # Stage 1: Multi-level coarsening using matching-based coarsening
+        coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+            J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
+        )
+        num_coarse_nodes = coarse_graph.shape[0]
+
+        # Build adjacency for coarse graph for KaFFPa
+        coarse_adj = [[] for _ in range(num_coarse_nodes)]
+        c_indices = coarse_graph.indices()
+        c_values = coarse_graph.values()
+
+        for idx in range(c_indices.shape[1]):
+            r, c = int(c_indices[0, idx]), int(c_indices[1, idx])
+            if r != c:
+                coarse_adj[r].append((c, int(c_values[idx].item())))
+
+        c_xadj = [0]
+        c_adjncy = []
+        c_adjcwgt = []
+        for r in range(num_coarse_nodes):
+            for c, w in coarse_adj[r]:
+                c_adjncy.append(c)
+                c_adjcwgt.append(w)
+            c_xadj.append(len(c_adjncy))
+
+        c_vwgt = coarse_node_weights.int().cpu().numpy().tolist()
+
+        # Stage 2: Run KaFFPa on coarse graph to get initial q-way partition
+        edgecut, coarse_assignment = simple_kaffpa(c_vwgt, c_xadj, c_adjcwgt, c_adjncy, q, epsilon=0.05, max_passes=10)
+        coarse_assignment = np.array(coarse_assignment)
+
+        # Stage 3: Project coarse partition back to original graph
+        initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+
+        # Stage 4: Cyclic Expansion QUBO refinement using FEM
+        # Convert sparse coupling matrix to adjacency list format
+        adjacency = adjacency_from_sparse(J)
+
+        # Run Cyclic Expansion refinement
+        refined_assignment = cyclic_expansion_refine(
+            adjacency,
+            initial_assignment,
+            q,
+            max_iterations=20,
+            max_candidates=50,
+            num_trials=num_trials,
+            num_steps=num_steps,
+            dev=dev,
+            patience=5
+        )
+
+        # Build output tensor
+        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        for i in range(n):
+            p[0, i, refined_assignment[i]] = 1.0
+
+        from FEM.problem import infer_bmincut
+        _, fem_eval_cut = infer_bmincut(J, p)
 
     elif partition_method == 'kahypar':
         try:
