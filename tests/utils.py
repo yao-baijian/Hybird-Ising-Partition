@@ -461,52 +461,81 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
         best_cut = current_cut
         best_state = current_parts[:]
 
-        heap = []
+        # Bucket-queue FM-style implementation for faster selection
+        # Discretize gains to integer buckets using a scale factor
+        scale = 1000.0
 
-        def push_candidate(v):
+        buckets = {}  # gain_score -> list of vertices
+        vertex_target = {}  # v -> target group
+
+        def gain_key(delta):
+            # higher key == better move (more negative delta)
+            return int(round(-delta * scale))
+
+        def insert_vertex(v):
             if locked[v]:
                 return
             g, delta = best_destination(v, current_parts)
-            if g != current_parts[v] and feasible_move(current_counts, current_parts[v], g, max_size):
-                heapq.heappush(heap, (delta, v, g))
+            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g, max_size):
+                return
+            k = gain_key(delta)
+            buckets.setdefault(k, []).append(v)
+            vertex_target[v] = g
 
         for v in range(n):
-            push_candidate(v)
+            insert_vertex(v)
 
         moved = False
-        while heap:
-            delta, v, g = heapq.heappop(heap)
+        # Maintain a sorted list of keys lazily when needed
+        while buckets:
+            # get current best key
+            best_k = max(buckets.keys())
+            # pop a vertex from that bucket
+            v = buckets[best_k].pop()
+            if not buckets[best_k]:
+                del buckets[best_k]
+
             if locked[v]:
+                vertex_target.pop(v, None)
                 continue
 
-            # Recompute lazily; stale entries are ignored.
+            # Recompute lazy
             best_g, best_delta = best_destination(v, current_parts)
-            if best_g != g or abs(best_delta - delta) > 1e-12:
+            k_new = gain_key(best_delta)
+            if best_g != vertex_target.get(v, None) or k_new != best_k:
+                # stale entry; reinsert if still valid
+                vertex_target[v] = best_g
                 if best_g != current_parts[v] and feasible_move(current_counts, current_parts[v], best_g, max_size):
-                    heapq.heappush(heap, (best_delta, v, best_g))
+                    buckets.setdefault(k_new, []).append(v)
+                else:
+                    vertex_target.pop(v, None)
                 continue
 
+            g = best_g
+            delta = best_delta
             if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g, max_size):
                 locked[v] = True
+                vertex_target.pop(v, None)
                 continue
 
+            # perform move
             old = current_parts[v]
             current_parts[v] = g
             current_counts[old] -= 1
             current_counts[g] += 1
             locked[v] = True
             moved = True
+            vertex_target.pop(v, None)
 
             current_cut += int(round(delta))
             if current_cut < best_cut:
                 best_cut = current_cut
                 best_state = current_parts[:]
 
-            # neighbors may have changed gains; allow them back in the queue
+            # neighbors gains changed; reinsert them
             for nbr, _w in neighbors[v]:
                 if not locked[nbr]:
-                    push_candidate(nbr)
-            # v is locked already; no need to reinsert
+                    insert_vertex(nbr)
 
         if not moved:
             break

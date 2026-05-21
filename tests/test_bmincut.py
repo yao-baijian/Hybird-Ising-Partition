@@ -33,13 +33,18 @@ manual_grad = False
 # 'kahypar'                   : KaHyPar partitioner alone
 # 'kaffpa'                    : KaFFPa partitioner alone
 # ==========================================
-partition_methods = ['direct_fem', 'kaffpa', 'coarse_fem_refine_kaffpa', 'coarse_kaffpa_refine_fem']
+partition_methods = [
+    'direct_fem',
+    'kaffpa',
+    'coarse_fem_refine_kaffpa',
+    'coarse_kaffpa_refine_fem'
+]
 
 # normal graph instances
 instance = 'tests/test_instances/G1.txt'
 # instance = '../partition/data/ash219/ash219.mtx'
 case_type = 'bmincut'
-q = 4  # Number of partitions
+q = 8  # Number of partitions
 
 # Use FEM parser to easily load the normal graph
 case_bmincut = FEM.from_file(case_type, instance, index_start=1)
@@ -415,6 +420,137 @@ for partition_method in partition_methods:
         _, fem_eval_cut = infer_bmincut(J, p)
         # suppressed intermediate prints
 
+    elif partition_method == 'coarse_metis_refine_fem':
+        # Coarsen, run METIS on coarse graph, then refine with FEM cyclic expansion
+        if not HAS_METIS:
+            raise ImportError("pymetis is required for 'coarse_metis_refine_fem' partition method")
+        start_time = time.time()
+
+        from utils import coarsen_graph_by_matching, expand_coarse_labels
+        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
+
+        J = case_bmincut.problem.coupling_matrix
+        if not J.is_sparse:
+            J = J.to_sparse()
+        J = J.coalesce()
+        n = J.shape[0]
+
+        coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+            J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
+        )
+        num_coarse_nodes = coarse_graph.shape[0]
+
+        # Build adjacency list for coarse METIS
+        c_indices = coarse_graph.indices()
+        c_values = coarse_graph.values()
+        coarse_adj_list = [[] for _ in range(num_coarse_nodes)]
+        for idx in range(c_indices.shape[1]):
+            r, c = int(c_indices[0, idx]), int(c_indices[1, idx])
+            if r != c:
+                coarse_adj_list[r].append(c)
+
+        edgecuts, coarse_parts = pymetis.part_graph(num_coarse_nodes and q or q, adjacency=coarse_adj_list)
+        coarse_assignment = np.array(coarse_parts)
+
+        initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+
+        # Run cyclic expansion FEM refinement on the full graph
+        adjacency = adjacency_from_sparse(J)
+        refined_assignment = cyclic_expansion_refine(
+            adjacency,
+            initial_assignment,
+            q,
+            max_iterations=50,
+            max_candidates=60,
+            num_trials=num_trials,
+            num_steps=num_steps,
+            dev=dev,
+            patience=10,
+            verbose=True,
+            allow_nonadjacent=True,
+        )
+
+        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        for i in range(n):
+            p[0, i, refined_assignment[i]] = 1.0
+
+        from FEM.problem import infer_bmincut
+        _, fem_eval_cut = infer_bmincut(J, p)
+
+    elif partition_method == 'coarse_kahypar_refine_fem':
+        # Coarsen, run KaHyPar on coarse graph, then refine with FEM cyclic expansion
+        try:
+            import kahypar
+        except ImportError:
+            raise ImportError("kahypar is required for 'coarse_kahypar_refine_fem' partition method")
+        start_time = time.time()
+
+        from utils import coarsen_graph_by_matching, expand_coarse_labels
+        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
+
+        J = case_bmincut.problem.coupling_matrix
+        if not J.is_sparse:
+            J = J.to_sparse()
+        J = J.coalesce()
+        n = J.shape[0]
+
+        coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+            J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
+        )
+        num_coarse_nodes = coarse_graph.shape[0]
+
+        # Build hyperedges for coarse graph
+        c_indices = coarse_graph.indices()
+        hyperedges = []
+        for idx in range(c_indices.shape[1]):
+            r, c = int(c_indices[0, idx]), int(c_indices[1, idx])
+            if r < c:
+                hyperedges.append([r, c])
+
+        num_hyperedges = len(hyperedges)
+        hyperedge_indices = []
+        hyperedge_indices_ptrs = [0]
+        for he in hyperedges:
+            hyperedge_indices.extend(he)
+            hyperedge_indices_ptrs.append(len(hyperedge_indices))
+
+        hypergraph = kahypar.Hypergraph(num_coarse_nodes, num_hyperedges, hyperedge_indices, hyperedge_indices_ptrs, q, [1]*num_hyperedges, [1]*num_coarse_nodes)
+        context = kahypar.Context()
+        try:
+            context.loadINIconfiguration("kahypar_config.ini")
+        except:
+            pass
+        context.setK(q)
+        context.setEpsilon(0.05)
+
+        kahypar.partition(hypergraph, context)
+        coarse_parts = [hypergraph.blockID(i) for i in range(num_coarse_nodes)]
+        coarse_assignment = np.array(coarse_parts)
+
+        initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+
+        adjacency = adjacency_from_sparse(J)
+        refined_assignment = cyclic_expansion_refine(
+            adjacency,
+            initial_assignment,
+            q,
+            max_iterations=50,
+            max_candidates=60,
+            num_trials=num_trials,
+            num_steps=num_steps,
+            dev=dev,
+            patience=10,
+            verbose=True,
+            allow_nonadjacent=True,
+        )
+
+        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        for i in range(n):
+            p[0, i, refined_assignment[i]] = 1.0
+
+        from FEM.problem import infer_bmincut
+        _, fem_eval_cut = infer_bmincut(J, p)
+
     elif partition_method == 'coarse_kaffpa_refine_fem':
         import kahip
         start_time = time.time()
@@ -472,12 +608,13 @@ for partition_method in partition_methods:
             initial_assignment,
             q,
             max_iterations=50,
-            max_candidates=70,
+            max_candidates=60,
             num_trials=num_trials,
             num_steps=num_steps,
             dev=dev,
             patience=10,
             verbose=False,
+            allow_nonadjacent = True
         )
 
         # Build output tensor

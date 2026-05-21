@@ -75,6 +75,7 @@ def select_candidate_pairs(
     q: int,
     max_candidates: int = 50,
     rng: Optional[np.random.Generator] = None,
+    allow_nonadjacent: bool = False,
 ) -> List[Tuple[int, int]]:
     """Select candidate swap pairs for Cyclic Expansion.
     
@@ -120,6 +121,10 @@ def select_candidate_pairs(
     # Greedily select disjoint pairs
     used = set()
     pairs = []
+    # Precompute boundary vertices by partition for non-adjacent selection
+    boundary_by_part: Dict[int, List[int]] = {pid: [] for pid in range(q)}
+    for v in boundary:
+        boundary_by_part[int(partition[v])].append(v)
     
     for u, score_u in vertex_scores:
         if u in used:
@@ -133,7 +138,8 @@ def select_candidate_pairs(
 
         neighbors = list(adjacency[u])
         rng.shuffle(neighbors)
-        
+
+        # First consider direct neighbors (prefer adjacent swaps)
         for j, w in neighbors:
             if j in used:
                 continue
@@ -147,7 +153,28 @@ def select_candidate_pairs(
             if combined_score > best_score:
                 best_score = combined_score
                 best_v = j
-        
+        # If allowed, also consider non-adjacent candidates from other partitions
+        if allow_nonadjacent:
+            for pid in range(q):
+                if pid == int(partition[u]):
+                    continue
+                # iterate boundary vertices in target partition
+                candidates = list(boundary_by_part.get(pid, []))
+                rng.shuffle(candidates)
+                for j in candidates:
+                    if j in used:
+                        continue
+                    if partition[j] == partition[u]:
+                        continue
+                    # If j is a neighbor it was already considered above; here w=0
+                    w = 0.0
+                    ext_deg_j = compute_external_degree(adjacency, partition, j)
+                    score_j = sum(ext_deg_j.values())
+                    combined_score = w + 0.5 * score_j
+                    if combined_score > best_score:
+                        best_score = combined_score
+                        best_v = j
+
         if best_v != -1:
             pairs.append((u, best_v))
             used.add(u)
@@ -480,6 +507,7 @@ def cyclic_expansion_refine(
     patience: int = 5,
     verbose: bool = False,
     seed: Optional[int] = None,
+    allow_nonadjacent: bool = False,
 ) -> np.ndarray:
     """Run Cyclic Expansion QUBO refinement on a graph partition.
     
@@ -517,7 +545,7 @@ def cyclic_expansion_refine(
     for iteration in range(max_iterations):
         # Select candidate pairs
         candidate_pairs = select_candidate_pairs(
-            adjacency, best_partition, q, max_candidates, rng=rng
+            adjacency, best_partition, q, max_candidates, rng=rng, allow_nonadjacent=allow_nonadjacent
         )
         
         if len(candidate_pairs) == 0:
