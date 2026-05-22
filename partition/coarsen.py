@@ -62,69 +62,166 @@ def _vertex_feature_matrix(hyperedges, num_nodes):
     return features / row_norm
 
 
-def _lsh_bucketize_vertices(hyperedges, num_nodes, target_buckets=None, num_planes=12, num_tables=3, seed=None):
-    """Pre-coarsen vertices with random-hyperplane LSH.
+def _vertex_incident_edge_sets(hyperedges, num_nodes):
+    incident = [set() for _ in range(num_nodes)]
+    for eid, he in enumerate(hyperedges):
+        for v in he:
+            if 0 <= v < num_nodes:
+                incident[v].add(eid)
+    return incident
 
-    Vertices hashed to the same bucket are treated as likely similar and are
-    merged first. This is a preprocessing pass before the standard contraction
-    routine.
+
+def _minhash_signatures(incident_edge_sets, num_hashes=128, seed=None):
+    rng = np.random.default_rng(seed)
+    num_vertices = len(incident_edge_sets)
+    if num_vertices == 0:
+        return np.empty((0, 0), dtype=np.uint64)
+
+    num_edges = 1 + max((max(s) for s in incident_edge_sets if s), default=-1)
+    if num_edges <= 0:
+        return np.zeros((num_vertices, max(1, int(num_hashes))), dtype=np.uint64)
+
+    num_hashes = max(1, int(num_hashes))
+    # Use a universal hash family over edge ids.
+    prime = np.uint64(4294967311)
+    a = rng.integers(1, int(prime - 1), size=num_hashes, dtype=np.uint64)
+    b = rng.integers(0, int(prime - 1), size=num_hashes, dtype=np.uint64)
+
+    edge_ids = np.arange(num_edges, dtype=np.uint64)
+    hashes = ((a[:, None] * edge_ids[None, :] + b[:, None]) % prime).astype(np.uint64)
+
+    signatures = np.full((num_vertices, num_hashes), np.uint64(prime - 1), dtype=np.uint64)
+    for v, edges in enumerate(incident_edge_sets):
+        if not edges:
+            continue
+        edge_idx = np.fromiter(edges, dtype=np.uint64)
+        signatures[v, :] = hashes[:, edge_idx].min(axis=1)
+    return signatures
+
+
+def _jaccard_similarity(edge_set_a, edge_set_b):
+    if not edge_set_a and not edge_set_b:
+        return 1.0
+    union = edge_set_a | edge_set_b
+    if not union:
+        return 0.0
+    inter = edge_set_a & edge_set_b
+    return float(len(inter)) / float(len(union))
+
+
+def _lsh_bucketize_vertices(hyperedges, num_nodes, target_buckets=None, num_planes=12, num_tables=3, seed=None, jaccard_threshold=0.15, num_hashes=64, verbose=False):
+    """Pre-coarsen vertices with MinHash signatures over incident hyperedge sets.
+
+    Vertices are bucketed by LSH bands of their MinHash signatures, then we
+    only merge vertices whose exact Jaccard similarity over incident hyperedge
+    sets exceeds `jaccard_threshold`.
     """
     rng = np.random.default_rng(seed)
-    features = _vertex_feature_matrix(hyperedges, num_nodes)
     if num_nodes == 0:
         return np.arange(0, dtype=np.int64), []
 
-    signatures = []
-    tables = max(1, int(num_tables))
+    incident_edge_sets = _vertex_incident_edge_sets(hyperedges, num_nodes)
+    signatures = _minhash_signatures(incident_edge_sets, num_hashes=num_hashes, seed=seed)
+
+    tables = max(8, int(num_tables))
     planes_per_table = max(1, int(num_planes))
     if target_buckets is not None and num_nodes > 0:
-        # Aim for a bucket count in the same ballpark as the requested coarse size.
+        # Keep band count and signature size in a sane range relative to target.
         expected_bits = int(np.clip(np.ceil(np.log2(max(2, num_nodes / max(1, int(target_buckets))))), 4, 16))
         planes_per_table = max(planes_per_table, expected_bits)
-        tables = max(tables, 1)
+        tables = max(tables, 8)
 
-    for _ in range(tables):
-        planes = rng.normal(size=(features.shape[1], planes_per_table)).astype(np.float32)
-        proj = features @ planes
-        bits = (proj >= 0.0).astype(np.uint8)
-        bucket_ids = np.zeros(num_nodes, dtype=np.uint64)
-        for bit_idx in range(bits.shape[1]):
-            bucket_ids |= (bits[:, bit_idx].astype(np.uint64) << np.uint64(bit_idx))
-        signatures.append(bucket_ids)
+    # LSH banding: each table contributes candidate buckets; vertices only need
+    # to collide in *one* band to be considered for an exact Jaccard check.
+    band_width = max(1, int(np.ceil(signatures.shape[1] / float(tables))))
+    candidate_buckets = {}
+    for table_idx in range(tables):
+        start = table_idx * band_width
+        end = min(signatures.shape[1], start + band_width)
+        if start >= end:
+            continue
+        band = signatures[:, start:end]
+        for v in range(num_nodes):
+            key = (table_idx,) + tuple(int(x) for x in band[v])
+            candidate_buckets.setdefault(key, []).append(v)
 
-    buckets = {}
+    # Union-find over candidate pairs produced by any band bucket.
+    parent = np.arange(num_nodes, dtype=np.int64)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[ry] = rx
+
+    threshold_checks = 0
+    threshold_hits = 0
+    candidate_pairs = 0
+    threshold = float(jaccard_threshold)
+
+    candidate_pairs_set = set()
+
+    for verts in candidate_buckets.values():
+        if len(verts) < 2:
+            continue
+        # Generate all unique pairs from the bucket and add to a global set
+        for i in range(len(verts)):
+            for j in range(i + 1, len(verts)):
+                u, v = verts[i], verts[j]
+                candidate_pairs_set.add(tuple(sorted((u, v))))
+
+    # Now, iterate through all unique candidate pairs for exact Jaccard check
+    for u, v in candidate_pairs_set:
+        candidate_pairs += 1
+        threshold_checks += 1
+        sim = _jaccard_similarity(incident_edge_sets[u], incident_edge_sets[v])
+        if sim >= threshold:
+            threshold_hits += 1
+            union(u, v)
+
+    # Optional fallback: if exact Jaccard produced almost no merges, relax the
+    # threshold adaptively down to a floor instead of leaving everything singleton.
+    if target_buckets is not None:
+        target_buckets = max(1, int(target_buckets))
+    merge_groups = {}
     for v in range(num_nodes):
-        key = tuple(int(sig[v]) for sig in signatures)
-        buckets.setdefault(key, []).append(v)
+        root = find(v)
+        merge_groups.setdefault(root, []).append(v)
 
-    if target_buckets is not None and len(buckets) < max(1, int(target_buckets)):
-        # If LSH collapses too aggressively, split the largest buckets by vertex id
-        # so the pre-coarsening does not destroy too much structure.
-        bucket_items = sorted(buckets.items(), key=lambda item: (-len(item[1]), item[0]))
-        while len(bucket_items) < max(1, int(target_buckets)) and bucket_items:
-            key, verts = bucket_items.pop(0)
-            if len(verts) <= 1:
-                bucket_items.append((key, verts))
-                break
-            split_point = max(1, len(verts) // 2)
-            left = verts[:split_point]
-            right = verts[split_point:]
-            bucket_items.append((key + ('L',), left))
-            if right:
-                bucket_items.append((key + ('R',), right))
-        buckets = {k: v for k, v in bucket_items}
+    if len(merge_groups) > max(1, int(target_buckets) if target_buckets is not None else num_nodes) * 2:
+        relax_threshold = threshold
+        while relax_threshold > 0.03 and len(merge_groups) > max(1, int(target_buckets) if target_buckets is not None else num_nodes) * 2:
+            relax_threshold = max(0.03, relax_threshold * 0.8)
+            parent = np.arange(num_nodes, dtype=np.int64)
+            for u, v in candidate_pairs_set: # Re-evaluate with relaxed threshold
+                sim = _jaccard_similarity(incident_edge_sets[u], incident_edge_sets[v])
+                if sim >= relax_threshold:
+                    union(u, v)
+            merge_groups = {}
+            for v in range(num_nodes):
+                root = find(v)
+                merge_groups.setdefault(root, []).append(v)
+        threshold = relax_threshold
 
-    groups = []
-    for verts in buckets.values():
-        if len(verts) == 1:
-            groups.append([verts[0]])
-        else:
-            groups.append(list(verts))
+    groups = list(merge_groups.values())
 
     original_to_bucket = np.empty(num_nodes, dtype=np.int64)
     for idx, verts in enumerate(groups):
         for v in verts:
             original_to_bucket[v] = idx
+
+    if verbose and threshold_checks > 0:
+        merge_ratio = float(threshold_hits) / float(threshold_checks)
+        if merge_ratio < 0.05 or merge_ratio > 0.95 or len(groups) > max(1, int(target_buckets) * 2 if target_buckets is not None else num_nodes):
+            print(
+                f"[kahypar_like] LSH/Jaccard threshold sanity: threshold={float(threshold):.3f}, "
+                f"hit_ratio={merge_ratio:.3f}, candidates={candidate_pairs}, buckets={len(groups)}, target={target_buckets}"
+            )
 
     return original_to_bucket, groups
 
@@ -165,7 +262,7 @@ def _graph_to_hyperedges_from_clique(coarse_graph):
     return hyperedges
 
 
-def coarsen_kahypar_like(hyperedges, num_nodes, q=2, coarsen_to=10, verbose=False, seed=None, lsh_planes=8, lsh_tables=2):
+def coarsen_kahypar_like(hyperedges, num_nodes, q=2, coarsen_to=10, verbose=False, seed=None, lsh_planes=4, lsh_tables=16):
     """Heap-based KaHyPar-like hypergraph contraction.
 
     The coarsener keeps contracting the best-rated pair until the coarse graph
@@ -184,6 +281,7 @@ def coarsen_kahypar_like(hyperedges, num_nodes, q=2, coarsen_to=10, verbose=Fals
         num_planes=lsh_planes,
         num_tables=lsh_tables,
         seed=seed,
+        verbose=verbose,
     )
     if verbose:
         print(f"[kahypar_like] LSH pre-coarsen: {num_nodes} -> {len(lsh_groups)} buckets")

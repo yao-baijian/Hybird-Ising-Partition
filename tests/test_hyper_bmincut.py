@@ -478,6 +478,7 @@ if partition_method in ['coarsen_fem_refine_kahypar', 'coarsen_kahypar_refine', 
                 mode_cycle=('flow', 'mcts', 'evolution'),
                 rounds=3,
                 q=q_ways,
+                verbose=True,
             )
             print(f"Step 3: hybrid_refine_partition finished in {time.time() - step3_refine_t0:.4f}s")
         else:

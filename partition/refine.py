@@ -3,6 +3,14 @@ import numpy as np
 from tests.utils import evaluate_kahypar_cut_value, greedy_refine_hypergraph_incremental
 
 
+def _target_counts(n, q):
+    if q <= 0:
+        return np.zeros(0, dtype=int)
+    base = n // q
+    remainder = n % q
+    return np.array([base + (1 if i < remainder else 0) for i in range(q)], dtype=int)
+
+
 def _balance_limits(assignment, max_imbalance, q=None):
     assignment = np.asarray(assignment, dtype=np.int64)
     if q is None:
@@ -18,13 +26,14 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
     rng = np.random.default_rng(seed)
     assignment = np.asarray(assignment, dtype=np.int64).copy()
     q, counts, min_size, max_size = _balance_limits(assignment, max_imbalance, q=q)
+    targets = _target_counts(len(assignment), q)
     if assignment.size == 0:
         return assignment
 
-    # Iteratively move vertices from oversized groups into undersized groups.
+    # Iteratively move vertices from surplus groups into deficit groups until exact quotas are met.
     for _ in range(max(1, assignment.size)):
-        over = np.where(counts > max_size)[0]
-        under = np.where(counts < min_size)[0]
+        over = np.where(counts > targets)[0]
+        under = np.where(counts < targets)[0]
         if len(over) == 0 or len(under) == 0:
             break
 
@@ -36,7 +45,7 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
             best_g = None
             best_score = None
             for g in under:
-                if counts[g] + 1 > max_size:
+                if counts[g] + 1 > targets[g]:
                     continue
                 trial = assignment.copy()
                 trial[v] = int(g)
@@ -56,8 +65,22 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
     return assignment
 
 
-def refine_with_flow_local_search(assignment, hyperedges, max_passes=3, max_imbalance=0.05, q=None):
+def _partition_summary(assignment, q=None):
+    assignment = np.asarray(assignment, dtype=np.int64)
+    if assignment.size == 0:
+        return 0, np.zeros(0, dtype=int), 0.0
+    if q is None:
+        q = int(assignment.max()) + 1
+    counts = np.bincount(assignment, minlength=q).astype(int)
+    ideal = assignment.size / float(q)
+    imb = float(np.max(np.abs(counts - ideal) / ideal)) if ideal > 0 else 0.0
+    return q, counts, imb
+
+
+def refine_with_flow_local_search(assignment, hyperedges, max_passes=3, max_imbalance=0.05, q=None, verbose=False):
     """Flow-inspired local search using a boundary exchange heuristic."""
+    if verbose:
+        print(f"[refine:flow] start max_passes={max_passes} max_imbalance={max_imbalance}")
     return greedy_refine_hypergraph_incremental(
         assignment,
         hyperedges,
@@ -68,34 +91,45 @@ def refine_with_flow_local_search(assignment, hyperedges, max_passes=3, max_imba
     )
 
 
-def refine_with_mcts(assignment, hyperedges, num_rollouts=16, depth=3, seed=None, max_imbalance=0.05, q=None):
+def refine_with_mcts(assignment, hyperedges, num_rollouts=16, depth=3, seed=None, max_imbalance=0.05, q=None, verbose=False):
     """Monte-Carlo style refinement via randomized move simulations."""
     rng = np.random.default_rng(seed)
     best = np.asarray(assignment, dtype=np.int64).copy()
     best_score = evaluate_kahypar_cut_value(best, hyperedges, [1.0] * len(hyperedges))[0]
     q = int(q) if q is not None else (int(best.max()) + 1 if best.size else 2)
-    _, counts, _, max_size = _balance_limits(best, max_imbalance, q=q)
+    _, counts, _, _ = _balance_limits(best, max_imbalance, q=q)
+    targets = _target_counts(len(best), q)
+    if verbose:
+        _, _, imb = _partition_summary(best, q=q)
+        print(f"[refine:mcts] start rollouts={num_rollouts} depth={depth} cut={best_score} imb={imb:.4f}")
     for _ in range(max(1, int(num_rollouts))):
         cand = best.copy()
         for _step in range(max(1, int(depth))):
             v = int(rng.integers(0, len(cand)))
             old = int(cand[v])
             new_g = int(rng.integers(0, q))
-            if new_g != old and counts[new_g] + 1 <= max_size:
+            if new_g != old and counts[new_g] + 1 <= targets[new_g] and counts[old] - 1 >= targets[old]:
                 cand[v] = new_g
         score = evaluate_kahypar_cut_value(cand, hyperedges, [1.0] * len(hyperedges))[0]
         if score < best_score:
             best_score = score
             best = cand
-    return _repair_balance(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    best = _repair_balance(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if verbose:
+        _, _, imb = _partition_summary(best, q=q)
+        print(f"[refine:mcts] done cut={best_score} imb={imb:.4f}")
+    return best
 
 
-def refine_with_evolution(assignment, hyperedges, population_size=8, generations=5, mutation_rate=0.1, seed=None, max_imbalance=0.05, q=None):
+def refine_with_evolution(assignment, hyperedges, population_size=8, generations=5, mutation_rate=0.1, seed=None, max_imbalance=0.05, q=None, verbose=False):
     """Small evolutionary search over discrete assignments."""
     rng = np.random.default_rng(seed)
     base = np.asarray(assignment, dtype=np.int64)
     q = int(q) if q is not None else (int(base.max()) + 1 if base.size else 2)
-    _, counts, _, max_size = _balance_limits(base, max_imbalance, q=q)
+    _, counts, _, _ = _balance_limits(base, max_imbalance, q=q)
+    if verbose:
+        _, _, imb = _partition_summary(base, q=q)
+        print(f"[refine:evolution] start pop={population_size} gens={generations} cut={evaluate_kahypar_cut_value(base, hyperedges, [1.0] * len(hyperedges))[0]} imb={imb:.4f}")
     population = [base.copy()]
     for _ in range(max(0, int(population_size) - 1)):
         cand = base.copy()
@@ -127,17 +161,96 @@ def refine_with_evolution(assignment, hyperedges, population_size=8, generations
 
     scored = [(evaluate_kahypar_cut_value(cand, hyperedges, [1.0] * len(hyperedges))[0], cand) for cand in population]
     scored.sort(key=lambda x: x[0])
-    return _repair_balance(scored[0][1], hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    best = _repair_balance(scored[0][1], hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if verbose:
+        _, _, imb = _partition_summary(best, q=q)
+        print(f"[refine:evolution] done cut={scored[0][0]} imb={imb:.4f}")
+    return best
 
 
-def hybrid_refine_partition(assignment, hyperedges, mode_cycle=('flow', 'mcts', 'evolution'), rounds=3, seed=None, max_imbalance=0.05, q=None):
+def hybrid_refine_partition(
+    assignment,
+    hyperedges,
+    mode_cycle=('mcts', 'evolution', 'flow'),
+    rounds=3,
+    seed=None,
+    max_imbalance=0.05,
+    q=None,
+    verbose=False,
+    mcts_rollouts=16,
+    mcts_depth=3,
+    evolution_population=8,
+    evolution_generations=5,
+    evolution_mutation=0.1,
+    flow_passes=3,
+):
     refined = np.asarray(assignment, dtype=np.int64).copy()
-    for i in range(max(1, int(rounds))):
-        mode = mode_cycle[i % len(mode_cycle)]
-        if mode == 'flow':
-            refined = refine_with_flow_local_search(refined, hyperedges, max_imbalance=max_imbalance, q=q)
-        elif mode == 'mcts':
-            refined = refine_with_mcts(refined, hyperedges, seed=seed, max_imbalance=max_imbalance, q=q)
-        elif mode == 'evolution':
-            refined = refine_with_evolution(refined, hyperedges, seed=seed, max_imbalance=max_imbalance, q=q)
-    return _repair_balance(refined, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if q is None:
+        q = int(refined.max()) + 1 if refined.size else 2
+
+    if verbose:
+        cut, _ = evaluate_kahypar_cut_value(refined, hyperedges, [1.0] * len(hyperedges))
+        _, counts, imb = _partition_summary(refined, q=q)
+        print(f"[refine:hybrid] start q={q} cut={cut} counts={counts.tolist()} imb={imb:.4f}")
+
+    for round_idx in range(max(1, int(rounds))):
+        if verbose:
+            print(f"[refine:hybrid] round {round_idx + 1}/{int(rounds)}")
+
+        # Initial exploration: MCTS -> evolutionary fusion -> flow refinement
+        stage_t0 = None
+
+        if 'mcts' in mode_cycle:
+            if verbose:
+                print("[refine:hybrid] stage=MCTS")
+            refined = refine_with_mcts(
+                refined,
+                hyperedges,
+                num_rollouts=mcts_rollouts,
+                depth=mcts_depth,
+                seed=seed,
+                max_imbalance=max_imbalance,
+                q=q,
+                verbose=verbose,
+            )
+
+        if 'evolution' in mode_cycle:
+            if verbose:
+                print("[refine:hybrid] stage=Evolution")
+            # seed the population with the MCTS result by directly evolving from it
+            refined = refine_with_evolution(
+                refined,
+                hyperedges,
+                population_size=evolution_population,
+                generations=evolution_generations,
+                mutation_rate=evolution_mutation,
+                seed=seed,
+                max_imbalance=max_imbalance,
+                q=q,
+                verbose=verbose,
+            )
+
+        if 'flow' in mode_cycle:
+            if verbose:
+                print("[refine:hybrid] stage=Flow")
+            refined = refine_with_flow_local_search(
+                refined,
+                hyperedges,
+                max_passes=flow_passes,
+                max_imbalance=max_imbalance,
+                q=q,
+                verbose=verbose,
+            )
+
+        refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+        if verbose:
+            cut, _ = evaluate_kahypar_cut_value(refined, hyperedges, [1.0] * len(hyperedges))
+            _, counts, imb = _partition_summary(refined, q=q)
+            print(f"[refine:hybrid] round_done cut={cut} counts={counts.tolist()} imb={imb:.4f}")
+
+    refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if verbose:
+        cut, _ = evaluate_kahypar_cut_value(refined, hyperedges, [1.0] * len(hyperedges))
+        _, counts, imb = _partition_summary(refined, q=q)
+        print(f"[refine:hybrid] done cut={cut} counts={counts.tolist()} imb={imb:.4f}")
+    return refined
