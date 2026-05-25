@@ -765,24 +765,24 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
     Simple replacement for kaffpa: perform FM-style local refinement starting
     from `part` (list of length n).
 
-    This implementation uses:
-    - a max-heap of candidate single-vertex moves,
-    - lazy gain recomputation,
-    - per-pass locking,
-    - rollback to the best prefix of moves.
-
     Returns (edgecut, part_list).
     """
-    import heapq
     import numpy as _np
+    import heapq
 
     n = len(vwgt)
+    vwgt = _np.asarray(vwgt, dtype=float)
     if part is None:
         base = _np.arange(n) % q
         _np.random.shuffle(base)
         part = base.tolist()
     else:
         part = [int(x) for x in part]
+
+    total_weight = float(vwgt.sum())
+    ideal = total_weight / float(q) if q > 0 else 0.0
+    max_block_weight = ideal * (1.0 + float(epsilon))
+    min_block_weight = ideal * (1.0 - float(epsilon))
 
     # Build symmetric adjacency lists. If the input contains duplicate edges,
     # we preserve them and aggregate weights when computing gains.
@@ -794,6 +794,10 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
             if j != i:
                 neighbors[i].append((j, w))
 
+    block_weights = _np.zeros(q, dtype=float)
+    for vertex, block in enumerate(part):
+        block_weights[block] += float(vwgt[vertex])
+
     def edgecut_of(parts):
         cut = 0.0
         for i in range(n):
@@ -803,125 +807,154 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
                     cut += w
         return int(round(cut))
 
-    def best_destination(vertex, parts):
-        old = parts[vertex]
+    def partition_imbalance(weights):
+        if ideal <= 0.0:
+            return 0.0
+        return float(_np.max(_np.abs(weights - ideal) / ideal))
+
+    def recompute_block_weights(parts):
+        weights = _np.zeros(q, dtype=float)
+        for vertex, block in enumerate(parts):
+            weights[block] += float(vwgt[vertex])
+        return weights
+
+    def cut_delta_for_move(vertex, old_group, new_group, parts):
+        weight_to = _np.zeros(q, dtype=float)
+        for nbr, w in neighbors[vertex]:
+            weight_to[parts[nbr]] += w
+        return float(weight_to[old_group] - weight_to[new_group])
+
+    def best_feasible_destination(vertex, parts, weights):
+        old_group = parts[vertex]
+        vertex_weight = float(vwgt[vertex])
         weight_to = _np.zeros(q, dtype=float)
         for nbr, w in neighbors[vertex]:
             weight_to[parts[nbr]] += w
 
-        best_group = old
+        best_group = old_group
         best_delta = 0.0
-        for g in range(q):
-            if g == old:
+        for new_group in range(q):
+            if new_group == old_group:
                 continue
-            # moving v from old -> g changes cut by w_to_old - w_to_g
-            delta = weight_to[old] - weight_to[g]
-            if delta < best_delta:
+            if weights[new_group] + vertex_weight > max_block_weight:
+                continue
+            delta = float(weight_to[old_group] - weight_to[new_group])
+            if delta > best_delta:
                 best_delta = delta
-                best_group = g
-        return best_group, float(best_delta)
+                best_group = new_group
+        return best_group, best_delta
 
-    def feasible_move(group_sizes, old_group, new_group, max_size):
-        return group_sizes[new_group] + 1 <= max_size
+    def apply_move(parts, weights, vertex, old_group, new_group):
+        parts[vertex] = new_group
+        vertex_weight = float(vwgt[vertex])
+        weights[old_group] -= vertex_weight
+        weights[new_group] += vertex_weight
 
-    counts = _np.bincount(_np.asarray(part, dtype=int), minlength=q).astype(int)
-    ideal = n / float(q)
-    max_size = ideal * (1.0 + float(epsilon))
+    def fm_refine(parts, weights):
+        current_parts = parts[:]
+        current_weights = weights.copy()
 
-    for _pass in range(max_passes):
-        locked = _np.zeros(n, dtype=bool)
-        current_parts = part[:]
-        current_counts = counts.copy()
-        pass_start_cut = edgecut_of(current_parts)
-        current_cut = pass_start_cut
-        best_cut = current_cut
-        best_state = current_parts[:]
+        for _pass in range(max_passes):
+            locked = _np.zeros(n, dtype=bool)
+            pass_start_cut = edgecut_of(current_parts)
+            best_cut = pass_start_cut
+            best_state = current_parts[:]
+            best_weights = current_weights.copy()
+            moved_any = False
 
-        # Bucket-queue FM-style implementation for faster selection
-        # Discretize gains to integer buckets using a scale factor
-        scale = 1000.0
+            heap = []
+            for v in range(n):
+                old_group = current_parts[v]
+                best_group, best_delta = best_feasible_destination(v, current_parts, current_weights)
+                if best_group != old_group:
+                    heapq.heappush(heap, (-best_delta, v, best_group))
 
-        buckets = {}  # gain_score -> list of vertices
-        vertex_target = {}  # v -> target group
+            while heap:
+                neg_delta, vertex, queued_group = heapq.heappop(heap)
+                if locked[vertex]:
+                    continue
 
-        def gain_key(delta):
-            # higher key == better move (more negative delta)
-            return int(round(-delta * scale))
+                old_group = current_parts[vertex]
+                best_group, best_delta = best_feasible_destination(vertex, current_parts, current_weights)
+                if best_group == old_group:
+                    locked[vertex] = True
+                    continue
+                if best_group != queued_group or abs(best_delta + neg_delta) > 1e-9:
+                    heapq.heappush(heap, (-best_delta, vertex, best_group))
+                    continue
 
-        def insert_vertex(v):
-            if locked[v]:
-                return
-            g, delta = best_destination(v, current_parts)
-            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g, max_size):
-                return
-            k = gain_key(delta)
-            buckets.setdefault(k, []).append(v)
-            vertex_target[v] = g
+                apply_move(current_parts, current_weights, vertex, old_group, best_group)
+                locked[vertex] = True
+                moved_any = True
 
-        for v in range(n):
-            insert_vertex(v)
+                current_cut = edgecut_of(current_parts)
+                if current_cut < best_cut:
+                    best_cut = current_cut
+                    best_state = current_parts[:]
+                    best_weights = current_weights.copy()
 
-        moved = False
-        # Maintain a sorted list of keys lazily when needed
-        while buckets:
-            # get current best key
-            best_k = max(buckets.keys())
-            # pop a vertex from that bucket
-            v = buckets[best_k].pop()
-            if not buckets[best_k]:
-                del buckets[best_k]
+            if not moved_any:
+                break
 
-            if locked[v]:
-                vertex_target.pop(v, None)
-                continue
+            current_parts = best_state
+            current_weights = best_weights
 
-            # Recompute lazy
-            best_g, best_delta = best_destination(v, current_parts)
-            k_new = gain_key(best_delta)
-            if best_g != vertex_target.get(v, None) or k_new != best_k:
-                # stale entry; reinsert if still valid
-                vertex_target[v] = best_g
-                if best_g != current_parts[v] and feasible_move(current_counts, current_parts[v], best_g, max_size):
-                    buckets.setdefault(k_new, []).append(v)
-                else:
-                    vertex_target.pop(v, None)
-                continue
+            if best_cut >= pass_start_cut:
+                break
 
-            g = best_g
-            delta = best_delta
-            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g, max_size):
-                locked[v] = True
-                vertex_target.pop(v, None)
-                continue
+        return current_parts, current_weights
 
-            # perform move
-            old = current_parts[v]
-            current_parts[v] = g
-            current_counts[old] -= 1
-            current_counts[g] += 1
-            locked[v] = True
-            moved = True
-            vertex_target.pop(v, None)
+    def repair_imbalance(parts, weights):
+        parts = parts[:]
+        weights = weights.copy()
 
-            current_cut += int(round(delta))
-            if current_cut < best_cut:
-                best_cut = current_cut
-                best_state = current_parts[:]
+        for _ in range(max_passes * max(1, q)):
+            if partition_imbalance(weights) <= float(epsilon):
+                break
 
-            # neighbors gains changed; reinsert them
-            for nbr, _w in neighbors[v]:
-                if not locked[nbr]:
-                    insert_vertex(nbr)
+            overloaded = [g for g in range(q) if weights[g] > max_block_weight]
+            if not overloaded:
+                break
 
-        if not moved:
-            break
+            underloaded = [g for g in range(q) if weights[g] < min_block_weight]
 
-        part = best_state
-        counts = _np.bincount(_np.asarray(part, dtype=int), minlength=q).astype(int)
+            best_move = None
+            best_key = None
 
-        # Stop if the pass did not improve over the cut at the start of the pass.
-        if best_cut >= pass_start_cut:
-            break
+            for from_group in overloaded:
+                for vertex in range(n):
+                    if parts[vertex] != from_group:
+                        continue
+
+                    vertex_weight = float(vwgt[vertex])
+                    weight_to = _np.zeros(q, dtype=float)
+                    for nbr, w in neighbors[vertex]:
+                        weight_to[parts[nbr]] += w
+
+                    candidate_groups = underloaded if underloaded else list(range(q))
+                    for to_group in candidate_groups:
+                        if to_group == from_group:
+                            continue
+                        if weights[to_group] + vertex_weight > max_block_weight:
+                            continue
+
+                        delta = float(weight_to[from_group] - weight_to[to_group])
+                        target_is_underloaded = weights[to_group] < min_block_weight
+                        key = (1 if target_is_underloaded else 0, delta, -weights[to_group])
+                        if best_key is None or key > best_key:
+                            best_key = key
+                            best_move = (vertex, from_group, to_group)
+
+            if best_move is None:
+                break
+
+            vertex, from_group, to_group = best_move
+            apply_move(parts, weights, vertex, from_group, to_group)
+
+        return parts, weights
+
+    part, block_weights = fm_refine(part, block_weights)
+    part, block_weights = repair_imbalance(part, block_weights)
 
     return edgecut_of(part), part
 

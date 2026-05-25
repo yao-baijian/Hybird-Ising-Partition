@@ -12,13 +12,13 @@ class FEM:
         pass
 
     @classmethod
-    def from_file(cls, problem_type, filename, index_start=0, epsilon=0.03, q=2, hyperedges=None, map_type='normal',**args):
+    def from_file(cls, problem_type, filename, index_start=0, hyperedges=None, map_type='normal',**args):
             num_nodes, num_interactions, couplings = parse_file(
                 problem_type, filename, index_start, map_type
             )
             fem = cls()
             fem.set_up_problem(
-                num_nodes, num_interactions, problem_type, couplings, epsilon=epsilon, hyperedges=hyperedges, q=q,**args
+                num_nodes, num_interactions, problem_type, couplings, hyperedges=hyperedges, **args
             )
             return fem
     
@@ -32,7 +32,7 @@ class FEM:
 
     def set_up_problem(
             self, num_nodes, num_interactions, problem_type, coupling_matrix, 
-            imbalance_weight=5.0, epsilon=0.03, q=2, hyperedges=None,
+            imbalance_weight=5.0, hyperedges=None,
             discretization=False, node_weights=None, customize_expected_func=None, customize_grad_func=None,
             customize_infer_func=None
         ):
@@ -45,7 +45,7 @@ class FEM:
             )
         self.problem = OptimizationProblem(
             num_nodes, num_interactions, coupling_matrix, 
-            problem_type, imbalance_weight, epsilon, q, hyperedges, node_weights, discretization, 
+            problem_type, imbalance_weight, hyperedges, node_weights, discretization, 
             customize_expected_func, customize_grad_func, customize_infer_func
         )
 

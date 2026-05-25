@@ -7,7 +7,9 @@ import time
 import numpy as np
 import warnings
 import os
-from utils import simple_kaffpa
+from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part
+from FEM.problem import infer_bmincut
+from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
 
 try:
     import pymetis
@@ -17,9 +19,9 @@ except ImportError:
     warnings.warn("pymetis is not installed. METIS mode will fail.")
 
 num_trials = 1
-num_steps = 500
+num_steps = 1000
 dev = 'cpu'
-anneal = 'lin'
+anneal = 'inverse'
 manual_grad = False
 
 # ==========================================
@@ -73,16 +75,8 @@ for partition_method in partition_methods:
         config, result = case_bmincut.solve()
         
         optimal_inds = torch.argwhere(result==result.min()).reshape(-1)
-        best_config = config[optimal_inds[0]]
-        assignment = best_config.argmax(dim=1).cpu().numpy()
-        
-        # In bmincut mode, result.min() essentially stores the final cut edges / objective
-        # Evaluate via FEM's native infer_bmincut explicitly
-        from FEM.problem import infer_bmincut
-        _, fem_cut_value = infer_bmincut(case_bmincut.problem.coupling_matrix, best_config.unsqueeze(0))
-        fem_cut_value = fem_cut_value.item()
-        
-        # suppressed intermediate prints; only table row will be output
+        p = config[optimal_inds[0]]
+        fem_eval_cut = result.min().item()
 
     elif partition_method == 'metis':
         if not HAS_METIS:
@@ -112,12 +106,11 @@ for partition_method in partition_methods:
         # suppressed intermediate prints
         
         # evaluate METIS assignment cut with FEM traditional bmincut cut
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(parts):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
             
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
         fem_eval_cut = fem_eval_cut.item()
         
         # suppressed intermediate prints
@@ -125,7 +118,6 @@ for partition_method in partition_methods:
     elif partition_method == 'coarse_fem_refine_metis':
         start_time = time.time()
         
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -176,12 +168,11 @@ for partition_method in partition_methods:
         edgecuts, parts = call_pymetis_with_part(q, adjacency_list, part=initial_assignment.tolist())
 
         # suppressed intermediate prints
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(parts):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
             
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
         # suppressed intermediate prints
 
     elif partition_method == 'coarse_fem_refine_kahypar':
@@ -191,7 +182,6 @@ for partition_method in partition_methods:
             raise ImportError("kahypar is required for 'coarse_fem_refine_kahypar' partition method")
         start_time = time.time()
         
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -271,19 +261,17 @@ for partition_method in partition_methods:
         part = [hypergraph.blockID(i) for i in range(n)]
 
         # suppressed intermediate prints
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(part):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
             
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
         # suppressed intermediate prints
 
     elif partition_method == 'coarse_fem_refine_kaffpa':
         import kahip
         start_time = time.time()
 
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -341,12 +329,11 @@ for partition_method in partition_methods:
         # Use local simple refinement (KL/FM-like) on top of FEM initial partition
         edgecut, part = simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, part=initial_assignment.tolist(), max_passes=10)
 
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(part):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
 
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
 
     elif partition_method == 'kaffpa':
         try:
@@ -355,7 +342,6 @@ for partition_method in partition_methods:
             raise ImportError("kahip is required for 'kaffpa' partition method")
         start_time = time.time()
         
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -363,7 +349,7 @@ for partition_method in partition_methods:
         n = J.shape[0]
         
         coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
-            J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=500
+            J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=200
         )
         num_coarse_nodes = coarse_graph.shape[0]
         
@@ -412,12 +398,11 @@ for partition_method in partition_methods:
         edgecut, part = simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, part=initial_assignment.tolist(), max_passes=10)
 
         # suppressed intermediate prints
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(part):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
 
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
         # suppressed intermediate prints
 
     elif partition_method == 'coarse_metis_refine_fem':
@@ -425,10 +410,6 @@ for partition_method in partition_methods:
         if not HAS_METIS:
             raise ImportError("pymetis is required for 'coarse_metis_refine_fem' partition method")
         start_time = time.time()
-
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
-        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
-
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -470,12 +451,11 @@ for partition_method in partition_methods:
             allow_nonadjacent=True,
         )
 
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i in range(n):
-            p[0, i, refined_assignment[i]] = 1.0
+            p[i, refined_assignment[i]] = 1.0
 
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
 
     elif partition_method == 'coarse_kahypar_refine_fem':
         # Coarsen, run KaHyPar on coarse graph, then refine with FEM cyclic expansion
@@ -484,10 +464,6 @@ for partition_method in partition_methods:
         except ImportError:
             raise ImportError("kahypar is required for 'coarse_kahypar_refine_fem' partition method")
         start_time = time.time()
-
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
-        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
-
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -544,20 +520,14 @@ for partition_method in partition_methods:
             allow_nonadjacent=True,
         )
 
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i in range(n):
-            p[0, i, refined_assignment[i]] = 1.0
-
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+            p[i, refined_assignment[i]] = 1.0
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
 
     elif partition_method == 'coarse_kaffpa_refine_fem':
         import kahip
         start_time = time.time()
-
-        from utils import coarsen_graph_by_matching, expand_coarse_labels
-        from FEM.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
-
         J = case_bmincut.problem.coupling_matrix
         if not J.is_sparse:
             J = J.to_sparse()
@@ -601,6 +571,8 @@ for partition_method in partition_methods:
         # Stage 4: Cyclic Expansion QUBO refinement using FEM
         # Convert sparse coupling matrix to adjacency list format
         adjacency = adjacency_from_sparse(J)
+        
+        num_steps_cyclic = 100
 
         # Run Cyclic Expansion refinement
         refined_assignment = cyclic_expansion_refine(
@@ -610,7 +582,7 @@ for partition_method in partition_methods:
             max_iterations=50,
             max_candidates=60,
             num_trials=num_trials,
-            num_steps=num_steps,
+            num_steps=num_steps_cyclic,
             dev=dev,
             patience=10,
             verbose=False,
@@ -618,12 +590,11 @@ for partition_method in partition_methods:
         )
 
         # Build output tensor
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i in range(n):
-            p[0, i, refined_assignment[i]] = 1.0
+            p[i, refined_assignment[i]] = 1.0
 
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
 
     elif partition_method == 'kahypar':
         try:
@@ -664,49 +635,32 @@ for partition_method in partition_methods:
         part = [hypergraph.blockID(i) for i in range(n)]
 
         # suppressed intermediate prints
-        p = torch.zeros((1, n, q), dtype=J.dtype, device=J.device)
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
         for i, p_group in enumerate(part):
-            p[0, i, p_group] = 1.0
+            p[i, p_group] = 1.0
             
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
+        _, fem_eval_cut = infer_bmincut(J, p.unsqueeze(0))
         # suppressed intermediate prints
 
     else:
         raise ValueError(f"Unknown partition method: {partition_method}")
 
-    if p is None and best_config is not None:
-        p = best_config.unsqueeze(0)
+    J = case_bmincut.problem.coupling_matrix
+    n = J.shape[0]
+    final_assignment = p.argmax(dim=1).cpu().numpy()
+    counts = np.bincount(final_assignment, minlength=q)
+    ideal = n / q
+    imbalance = float(np.max(np.abs(counts - ideal) / ideal))
 
-    if p is not None:
-        # p is of shape (1, n, q) representing permutations
-        J = case_bmincut.problem.coupling_matrix
-        if not J.is_sparse:
-            J = J.to_sparse()
-        J = J.coalesce()
-        n = J.shape[0]
+    # Evaluate cut value via FEM's infer_bmincut to ensure consistent metric
+    try:
+        cut_value = float(fem_eval_cut.item())
+    except Exception:
 
-        final_assignment = p[0].argmax(dim=1).cpu().numpy()
-        counts = np.bincount(final_assignment, minlength=q)
-        ideal = n / q
-        imbalance = float(np.max(np.abs(counts - ideal) / ideal))
+        cut_value = float(fem_eval_cut)
 
-        # Evaluate cut value via FEM's infer_bmincut to ensure consistent metric
-        from FEM.problem import infer_bmincut
-        _, fem_eval_cut = infer_bmincut(J, p)
-        try:
-            cut_value = float(fem_eval_cut.item())
-        except Exception:
-            cut_value = float(fem_eval_cut)
-
-        # elapsed time if branch recorded start_time
-        try:
-            elapsed = time.time() - start_time
-        except Exception:
-            elapsed = 0.0
-
-        # Print fixed-width table row (trim path from instance name)
-        instance_name = os.path.basename(instance)
-        col_w = (24, 22, 10, 12, 10)
-        row_fmt = f"{{:<{col_w[0]}}} {{:<{col_w[1]}}} {{:>{col_w[2]}.4f}} {{:>{col_w[3]}.1f}} {{:>{col_w[4]}.4f}}"
-        print(row_fmt.format(instance_name, partition_method, elapsed, cut_value, imbalance))
+    elapsed = time.time() - start_time
+    instance_name = os.path.basename(instance)
+    col_w = (24, 22, 10, 12, 10)
+    row_fmt = f"{{:<{col_w[0]}}} {{:<{col_w[1]}}} {{:>{col_w[2]}.4f}} {{:>{col_w[3]}.1f}} {{:>{col_w[4]}.4f}}"
+    print(row_fmt.format(instance_name, partition_method, elapsed, cut_value, imbalance))
