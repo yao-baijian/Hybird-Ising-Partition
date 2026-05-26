@@ -44,7 +44,7 @@ except ImportError:
 
 
 num_trials = 1
-num_steps = 20
+num_steps = 80
 dev = 'cpu'
 instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
 
@@ -53,19 +53,17 @@ instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
 # 'direct_fem'             : Original FEM applied directly to the clique-expanded hypergraph
 # 'coarsen_fem_refine_kahypar' : QUBO-based matching coarsening (FEM) + KaHyPar on coarse hypergraph
 # 'coarsen_kahypar_refine' : Multi-level coarsening + KaHyPar initial guess + Greedy refinement
-# 'kahyper_like'           : Self-implemented KaHyPar-like coarsening + greedy coarse solve + greedy refinement
-# 'kahyper_like_no_lsh'    : Same as above but with LSH disabled (pure Heavy Edge Matching)
+# 'kahyper_like'           : Self-implemented KaHyPar-like coarsening, split into [HEM] and [LSH] submodes
 # 'pubo_direct'            : Full PUBO-based objective directly on hypergraph (Auto Grad + Opt)
 # 'pubo_coarsen'           : Coarsening framework + PUBO on the compressed hyperedges
 # 'pubo_q4_explicit'       : Coarsening + explicit formulation via expected_hyperbmincut_explicit
 # 'pubo_implicit'          : Coarsening + approximate formulation via expected_hyperbmincut
 # ==========================================
-partition_methods = [
+partition_runs = [
     # 'direct_fem',
-    'coarsen_fem_refine_kahypar',
+    'coarsen_fem_refine_kahypar[fem_as_greedy_init]',
     'coarsen_kahypar_refine',
-    'kahyper_like',
-    'kahyper_like_no_lsh',
+    'kahyper_like[HEM]',
     # 'pubo_direct',
     # 'pubo_coarsen',
     # 'pubo_q4_explicit',
@@ -101,6 +99,21 @@ def _print_results_table(rows):
                 f"{row['imbalance']:.6f}",
             )
         )
+
+
+def _print_result_row(row):
+    col_w = (30, 28, 10, 12, 10)
+    header_fmt = f"{{:<{col_w[0]}}} {{:<{col_w[1]}}} {{:>{col_w[2]}}} {{:>{col_w[3]}}} {{:>{col_w[4]}}}"
+    print(
+        header_fmt.format(
+            row['instance'],
+            row['method'],
+            f"{row['time_s']:.4f}",
+            f"{row['cut']:.4f}",
+            f"{row['imbalance']:.6f}",
+        ),
+        flush=True,
+    )
 
 
 def run_kahypar_like_multilevel(
@@ -149,16 +162,25 @@ def _compute_summary(final_assignment, hyperedges, q_ways):
     return float(fem_cut_value), max_imbalance
 
 
-def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, q_ways, verbose=False):
-    requested_method = partition_method
+def _parse_run_label(run_label):
+    if '[' not in run_label or not run_label.endswith(']'):
+        return run_label, None
+    method_name, submode = run_label[:-1].split('[', 1)
+    return method_name, submode
+
+
+def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways, verbose=False):
+    partition_method, submode = _parse_run_label(run_label)
+    display_label = run_label
+    fem_mode = submode or 'fem_as_hem'
+    use_lsh = submode == 'LSH'
     start_time = time.time()
     log = lambda msg: _log(msg, verbose)
 
     log(f"Loading {instance}...")
-    log(f"====== Running {partition_method} ======")
+    log(f"====== Running {display_label} ======")
 
     if partition_method == 'direct_fem':
-        log("====== Running Direct FEM ======")
         graph_for_fem = clique_graph
         node_weights_for_fem = torch.ones(num_nodes, dtype=torch.float32)
 
@@ -179,7 +201,6 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
         final_assignment = best_config.argmax(dim=1).cpu().numpy()
 
     elif partition_method == 'pubo_direct':
-        log("====== Running Direct PUBO FEM ======")
         pubo_obj = PUBOObjective(
             hyperedges,
             [1.0] * len(hyperedges),
@@ -209,9 +230,8 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
         best_config = config[2] if len(config) > 2 else config[0]
         final_assignment = best_config.argmax(dim=1).cpu().numpy()
 
-    elif partition_method in ['coarsen_fem_refine_kahypar', 'coarsen_kahypar_refine', 'kahyper_like', 'kahyper_like_no_lsh', 'pubo_coarsen', 'pubo_q4_explicit', 'pubo_implicit']:
-        log(f"====== Running {partition_method} ======")
-        if partition_method in ['coarsen_kahypar_refine', 'kahyper_like', 'kahyper_like_no_lsh']:
+    elif partition_method in ['coarsen_fem_refine_kahypar', 'coarsen_kahypar_refine', 'kahyper_like', 'pubo_coarsen', 'pubo_q4_explicit', 'pubo_implicit']:
+        if partition_method in ['coarsen_kahypar_refine', 'kahyper_like']:
             coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, initial_assignment = run_kahypar_like_multilevel(
                 clique_graph,
                 hyperedges,
@@ -219,7 +239,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
                 q_ways,
                 coarsen_to=30,
                 verbose=verbose,
-                use_lsh=(partition_method == 'kahyper_like'),
+                use_lsh=use_lsh,
             )
             num_coarse_nodes = coarse_graph.shape[0]
             log(f"KaHyPar-like coarse partitioning took: {time.time() - start_time:.4f} seconds")
@@ -233,6 +253,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
                 num_steps=num_steps,
                 dev=dev,
                 verbose=verbose,
+                fem_mode=fem_mode,
             )
             coarse_graph = shared_res['coarse_graph']
             coarse_node_weights = shared_res['coarse_node_weights']
@@ -255,7 +276,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
             use_kahypar_refine = True
         elif partition_method == 'coarsen_kahypar_refine' and not HAS_KAHYPAR:
             log("KaHyPar is requested but not installed. Falling back to FEM on the coarsened graph (coarsen_fem_refine).")
-            partition_method = 'coarsen_fem_refine'
+            partition_method = 'coarsen_fem_refine_kahypar'
 
         if partition_method == 'pubo_coarsen':
             log("Using PUBO as the primary solver on the coarsened graph...")
@@ -355,7 +376,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
         group_assignment = expand_coarse_labels(coarse_groups, initial_assignment, num_nodes)
         log(f"Step 3: expand_coarse_labels finished in {time.time() - step3_t0:.4f}s")
 
-        if requested_method in ('coarsen_kahypar_refine', 'coarsen_fem_refine_kahypar') and HAS_KAHYPAR and use_kahypar_refine:
+        if partition_method in ('coarsen_kahypar_refine', 'coarsen_fem_refine_kahypar') and HAS_KAHYPAR and use_kahypar_refine:
             log("Step 3: Running KaHyPar refinement on the original hypergraph...")
             hyperedges_indices = []
             hyperedges_ptrs = [0]
@@ -380,7 +401,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
         else:
             log("Step 3: Running Hybrid Refinement (Flow + MCTS + Evolution)...")
             step3_refine_t0 = time.time()
-            if requested_method in ('kahyper_like', 'kahyper_like_no_lsh'):
+            if partition_method == 'kahyper_like':
                 final_assignment = hybrid_refine_partition(
                     group_assignment,
                     hyperedges,
@@ -390,7 +411,7 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
                     verbose=verbose,
                 )
                 log(f"Step 3: hybrid_refine_partition finished in {time.time() - step3_refine_t0:.4f}s")
-            elif requested_method == 'coarsen_fem_refine_kahypar':
+            elif partition_method == 'coarsen_fem_refine_kahypar':
                 final_assignment = hybrid_refine_partition(
                     group_assignment,
                     hyperedges,
@@ -414,13 +435,13 @@ def run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, 
                 )
                 log(f"Step 3: greedy_refine_hypergraph_incremental finished in {time.time() - step3_refine_t0:.4f}s")
     else:
-        raise ValueError(f"Unknown partition method: {requested_method}")
+        raise ValueError(f"Unknown partition method: {partition_method}")
 
     cut_value, max_imbalance = _compute_summary(final_assignment, hyperedges, q_ways)
     elapsed = time.time() - start_time
     return {
         'instance': instance,
-        'method': requested_method,
+        'method': display_label,
         'time_s': elapsed,
         'cut': cut_value,
         'imbalance': max_imbalance,
@@ -434,8 +455,7 @@ clique_graph = build_clique_expanded_graph(hyperedges, num_nodes=num_nodes, norm
 
 q_ways = 4
 
-rows = []
-for partition_method in partition_methods:
-    rows.append(run_partition_method(partition_method, hyperedges, clique_graph, num_nodes, q_ways, verbose=verbose))
-
-_print_results_table(rows)
+_print_results_table([])
+for run_label in partition_runs:
+    row = run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways, verbose=verbose)
+    _print_result_row(row)
