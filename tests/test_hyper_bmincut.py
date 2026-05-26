@@ -70,7 +70,7 @@ partition_runs = [
     # 'pubo_implicit',
 ]
 
-verbose = False
+verbose = True
 
 # Whether to use LSH pre-clustering before Heavy Edge Matching.
 # When False (default for kahyper_like_no_lsh), HEM runs directly on the original hypergraph.
@@ -421,7 +421,6 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
                     verbose=verbose,
                     flow_passes=2,
                     skip_exploration_if_good=True,
-                    good_cut_threshold=200.0,
                 )
                 log(f"Step 3: flow-only refinement finished in {time.time() - step3_refine_t0:.4f}s")
             else:

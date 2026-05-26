@@ -3,6 +3,11 @@ import numpy as np
 import torch
 from itertools import combinations
 
+
+def _sparse_coo_tensor_no_check(indices, values, size):
+    with torch.sparse.check_sparse_tensor_invariants(False):
+        return torch.sparse_coo_tensor(indices, values, size)
+
 def parse_hypergraph_edges(instance_path: str) -> list:
     hyperedges = []
     try:
@@ -79,11 +84,15 @@ def build_clique_expanded_graph(hyperedges: list, num_nodes: int = None, normali
             values.extend([edge_weight, edge_weight])
 
     if not rows:
-        return torch.sparse_coo_tensor(torch.empty((2, 0), dtype=torch.long), torch.empty((0,), dtype=torch.float32), (num_nodes, num_nodes)).coalesce()
+        return _sparse_coo_tensor_no_check(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            (num_nodes, num_nodes),
+        ).coalesce()
 
     indices = torch.tensor([rows, cols], dtype=torch.long)
     weights = torch.tensor(values, dtype=torch.float32)
-    return torch.sparse_coo_tensor(indices, weights, (num_nodes, num_nodes)).coalesce()
+    return _sparse_coo_tensor_no_check(indices, weights, (num_nodes, num_nodes)).coalesce()
 
 
 def _sparse_to_adjacency_dict(J: torch.Tensor):
@@ -175,9 +184,13 @@ def coarsen_graph_by_matching(J: torch.Tensor, node_weights=None, max_node_weigh
         if np.any(valid):
             coarse_indices = torch.tensor(np.stack([coarse_rows[valid], coarse_cols[valid]]), dtype=torch.long)
             coarse_values = values[torch.from_numpy(valid)]
-            current_J = torch.sparse_coo_tensor(coarse_indices, coarse_values, (new_n, new_n)).coalesce()
+            current_J = _sparse_coo_tensor_no_check(coarse_indices, coarse_values, (new_n, new_n)).coalesce()
         else:
-            current_J = torch.sparse_coo_tensor(torch.empty((2, 0), dtype=torch.long), torch.empty((0,), dtype=torch.float32), (new_n, new_n)).coalesce()
+            current_J = _sparse_coo_tensor_no_check(
+                torch.empty((2, 0), dtype=torch.long),
+                torch.empty((0,), dtype=torch.float32),
+                (new_n, new_n),
+            ).coalesce()
             
         current_n = new_n
         current_weights = np.array(new_weights, dtype=np.float32)
@@ -316,7 +329,11 @@ def coarsen_graph_n_level(
         next_idx += 1
 
     if next_idx == 0:
-        current_J = torch.sparse_coo_tensor(torch.empty((2, 0), dtype=torch.long), torch.empty((0,), dtype=torch.float32), (0, 0)).coalesce()
+        current_J = _sparse_coo_tensor_no_check(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            (0, 0),
+        ).coalesce()
     else:
         rows = []
         cols = []
@@ -337,9 +354,13 @@ def coarsen_graph_n_level(
         if rows:
             indices = torch.tensor([rows, cols], dtype=torch.long)
             values = torch.tensor(vals, dtype=torch.float32)
-            current_J = torch.sparse_coo_tensor(indices, values, (next_idx, next_idx)).coalesce()
+            current_J = _sparse_coo_tensor_no_check(indices, values, (next_idx, next_idx)).coalesce()
         else:
-            current_J = torch.sparse_coo_tensor(torch.empty((2, 0), dtype=torch.long), torch.empty((0,), dtype=torch.float32), (next_idx, next_idx)).coalesce()
+            current_J = _sparse_coo_tensor_no_check(
+                torch.empty((2, 0), dtype=torch.long),
+                torch.empty((0,), dtype=torch.float32),
+                (next_idx, next_idx),
+            ).coalesce()
 
     current_weights = np.array(new_weights, dtype=np.float32)
     groups = new_groups

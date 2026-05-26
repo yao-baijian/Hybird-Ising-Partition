@@ -6,6 +6,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from partition import coarsen_kahypar_like, coarsen_fem_refine_kahypar, evaluate_coarse_cut
+from tests.utils import expand_coarse_labels
 from tests.utils import parse_hypergraph_edges
 
 
@@ -23,21 +24,27 @@ def _run_mode(mode_name, fn, hyperedges, num_nodes, **kwargs):
     assert 'initial_assignment' in res
     assert len(res['coarse_groups']) > 0
     cut, imb = evaluate_coarse_cut(res['coarse_hyperedges'], res['initial_assignment'])
-    print(f'{mode_name} coarse cut = {cut}, imbalance = {imb}, coarse_nodes = {len(res["coarse_groups"])}')
-    return res, cut, imb
+    projected_assignment = expand_coarse_labels(res['coarse_groups'], res['initial_assignment'], num_nodes)
+    projected_cut, projected_imb = evaluate_coarse_cut(hyperedges, projected_assignment)
+    print(
+        f'{mode_name} coarse cut = {cut}, imbalance = {imb}, '
+        f'projected cut = {projected_cut}, projected imbalance = {projected_imb}, '
+        f'coarse_nodes = {len(res["coarse_groups"])}'
+    )
+    return res, cut, imb, projected_cut, projected_imb
 
 
 def test_compare_coarsen_modes():
     hyperedges, num_nodes = make_real_hypergraph()
-    _, kahypar_cut, kahypar_imb = _run_mode('kahypar_like', coarsen_kahypar_like, hyperedges, num_nodes)
-    _, fem_hem_cut, fem_hem_imb = _run_mode(
+    _, kahypar_cut, kahypar_imb, kahypar_projected_cut, kahypar_projected_imb = _run_mode('kahypar_like', coarsen_kahypar_like, hyperedges, num_nodes)
+    _, fem_hem_cut, fem_hem_imb, fem_hem_projected_cut, fem_hem_projected_imb = _run_mode(
         'coarsen_fem_refine_kahypar[fem_as_hem]',
         coarsen_fem_refine_kahypar,
         hyperedges,
         num_nodes,
         fem_mode='fem_as_hem',
     )
-    _, fem_greedy_cut, fem_greedy_imb = _run_mode(
+    _, fem_greedy_cut, fem_greedy_imb, fem_greedy_projected_cut, fem_greedy_projected_imb = _run_mode(
         'coarsen_fem_refine_kahypar[fem_as_greedy_init]',
         coarsen_fem_refine_kahypar,
         hyperedges,
@@ -49,6 +56,7 @@ def test_compare_coarsen_modes():
     assert isinstance(fem_hem_cut, (int, float)) and fem_hem_cut >= 0
     assert isinstance(fem_greedy_cut, (int, float)) and fem_greedy_cut >= 0
     assert kahypar_imb >= 0 and fem_hem_imb >= 0 and fem_greedy_imb >= 0
+    assert kahypar_projected_imb >= 0 and fem_hem_projected_imb >= 0 and fem_greedy_projected_imb >= 0
 
     # Comparison is intentionally soft: we only ensure the two coarse stages are both valid
     # and expose their scores for inspection.
@@ -57,6 +65,12 @@ def test_compare_coarsen_modes():
         f'kahypar_like={kahypar_cut} vs '
         f'fem_as_hem={fem_hem_cut} vs '
         f'fem_as_greedy_init={fem_greedy_cut}'
+    )
+    print(
+        'projected comparison: '
+        f'kahypar_like={kahypar_projected_cut}/{kahypar_projected_imb} vs '
+        f'fem_as_hem={fem_hem_projected_cut}/{fem_hem_projected_imb} vs '
+        f'fem_as_greedy_init={fem_greedy_projected_cut}/{fem_greedy_projected_imb}'
     )
 
 
