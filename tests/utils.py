@@ -173,12 +173,12 @@ def coarsen_graph_by_matching(J: torch.Tensor, node_weights=None, max_node_weigh
         if new_n == current_n:
             break
             
-        # Move sparse tensor data to CPU before converting to numpy
-        indices = current_J.indices().cpu()
-        values = current_J.values().cpu()
+        # Move sparse tensor data to CPU and convert to numpy arrays safely
+        indices_np = current_J.indices().detach().cpu().numpy()
+        values = current_J.values().detach().cpu()
 
-        coarse_rows = remap[indices[0].numpy()]
-        coarse_cols = remap[indices[1].numpy()]
+        coarse_rows = remap[indices_np[0]]
+        coarse_cols = remap[indices_np[1]]
         
         valid = coarse_rows != coarse_cols
         
