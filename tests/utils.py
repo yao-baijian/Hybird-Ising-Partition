@@ -167,13 +167,13 @@ def coarsen_graph_by_matching(J: torch.Tensor, node_weights=None, max_node_weigh
         indices = current_J.indices()
         values = current_J.values()
         
-        coarse_rows = remap[indices[0].numpy()]
-        coarse_cols = remap[indices[1].numpy()]
+        coarse_rows = remap[indices[0].cpu().numpy()]
+        coarse_cols = remap[indices[1].cpu().numpy()]
         
         valid = coarse_rows != coarse_cols
         
         if np.any(valid):
-            coarse_indices = torch.tensor(np.stack([coarse_rows[valid], coarse_cols[valid]]), dtype=torch.long)
+            coarse_indices = torch.tensor(np.stack([coarse_rows[valid], coarse_cols[valid]]), dtype=torch.long, device=values.device)
             coarse_values = values[torch.from_numpy(valid)]
             current_J = torch.sparse_coo_tensor(coarse_indices, coarse_values, (new_n, new_n)).coalesce()
         else:
@@ -926,10 +926,173 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
     return edgecut_of(part), part
 
 
-def call_pymetis_with_part(q, adjacency_list, part=None):
-    """Call pymetis.part_graph and pass `part` when supported by the wrapper.
-    If the wrapper doesn't accept `part`, prints a clear warning and calls
-    without it (no silent fallback). Returns (edgecuts, parts).
+def _fm_refinement(adjacency_list, q, part, epsilon=0.05, max_passes=10):
+    """FM-style local refinement for graph partitioning.
+    
+    This is a self-contained refinement routine that can be used when
+    pymetis doesn't support passing an initial partition. It performs
+    greedy local moves to reduce edge cut while maintaining balance.
+    
+    Args:
+        adjacency_list: list of lists, adjacency_list[i] = [neighbors of i]
+        q: number of partitions
+        part: initial partition assignment (list of length n)
+        epsilon: allowed imbalance
+        max_passes: maximum refinement passes
+        
+    Returns:
+        (edgecut, refined_part)
+    """
+    import heapq
+    import numpy as np
+    
+    n = len(adjacency_list)
+    part = [int(x) for x in part]
+    
+    # Build weighted adjacency (unweighted = weight 1)
+    neighbors = [[] for _ in range(n)]
+    for i in range(n):
+        for j in adjacency_list[i]:
+            if j != i:
+                neighbors[i].append((j, 1.0))
+    
+    def edgecut_of(parts):
+        cut = 0.0
+        for i in range(n):
+            pi = parts[i]
+            for j, w in neighbors[i]:
+                if i < j and pi != parts[j]:
+                    cut += w
+        return int(round(cut))
+    
+    def best_destination(vertex, parts):
+        old = parts[vertex]
+        weight_to = np.zeros(q, dtype=float)
+        for nbr, w in neighbors[vertex]:
+            weight_to[parts[nbr]] += w
+        best_group = old
+        best_delta = 0.0
+        for g in range(q):
+            if g == old:
+                continue
+            delta = weight_to[old] - weight_to[g]
+            if delta < best_delta:
+                best_delta = delta
+                best_group = g
+        return best_group, float(best_delta)
+    
+    counts = np.bincount(np.asarray(part, dtype=int), minlength=q).astype(int)
+    ideal = n / float(q)
+    max_size = ideal * (1.0 + float(epsilon))
+    
+    def feasible_move(group_sizes, old_group, new_group):
+        return group_sizes[new_group] + 1 <= max_size
+    
+    for _pass in range(max_passes):
+        locked = np.zeros(n, dtype=bool)
+        current_parts = part[:]
+        current_counts = counts.copy()
+        pass_start_cut = edgecut_of(current_parts)
+        current_cut = pass_start_cut
+        best_cut = current_cut
+        best_state = current_parts[:]
+        
+        scale = 1000.0
+        buckets = {}
+        vertex_target = {}
+        
+        def gain_key(delta):
+            return int(round(-delta * scale))
+        
+        def insert_vertex(v):
+            if locked[v]:
+                return
+            g, delta = best_destination(v, current_parts)
+            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g):
+                return
+            k = gain_key(delta)
+            buckets.setdefault(k, []).append(v)
+            vertex_target[v] = g
+        
+        for v in range(n):
+            insert_vertex(v)
+        
+        moved = False
+        while buckets:
+            best_k = max(buckets.keys())
+            v = buckets[best_k].pop()
+            if not buckets[best_k]:
+                del buckets[best_k]
+            
+            if locked[v]:
+                vertex_target.pop(v, None)
+                continue
+            
+            best_g, best_delta = best_destination(v, current_parts)
+            k_new = gain_key(best_delta)
+            if best_g != vertex_target.get(v, None) or k_new != best_k:
+                vertex_target[v] = best_g
+                if best_g != current_parts[v] and feasible_move(current_counts, current_parts[v], best_g):
+                    buckets.setdefault(k_new, []).append(v)
+                else:
+                    vertex_target.pop(v, None)
+                continue
+            
+            g = best_g
+            delta = best_delta
+            if g == current_parts[v] or not feasible_move(current_counts, current_parts[v], g):
+                locked[v] = True
+                vertex_target.pop(v, None)
+                continue
+            
+            old = current_parts[v]
+            current_parts[v] = g
+            current_counts[old] -= 1
+            current_counts[g] += 1
+            locked[v] = True
+            moved = True
+            vertex_target.pop(v, None)
+            
+            current_cut += int(round(delta))
+            if current_cut < best_cut:
+                best_cut = current_cut
+                best_state = current_parts[:]
+            
+            for nbr, _w in neighbors[v]:
+                if not locked[nbr]:
+                    insert_vertex(nbr)
+        
+        if not moved:
+            break
+        
+        part = best_state
+        counts = np.bincount(np.asarray(part, dtype=int), minlength=q).astype(int)
+        
+        if best_cut >= pass_start_cut:
+            break
+    
+    return edgecut_of(part), part
+
+
+def call_pymetis_with_part(q, adjacency_list, part=None, epsilon=0.05, max_passes=10):
+    """Call pymetis.part_graph with optional initial partition refinement.
+    
+    Since pymetis.part_graph does NOT support passing an initial partition,
+    this function uses a two-step approach when `part` is provided:
+      1. Skip pymetis entirely (since it would ignore our initial partition)
+      2. Use our own FM-style refinement to improve the provided partition
+    
+    When `part` is None, falls back to vanilla pymetis.part_graph.
+    
+    Args:
+        q: number of partitions
+        adjacency_list: graph adjacency as list of lists
+        part: optional initial partition (list of length n, values in 0..q-1)
+        epsilon: allowed imbalance for refinement
+        max_passes: max FM refinement passes
+        
+    Returns:
+        (edgecuts, parts) tuple
     """
     import importlib, inspect, sys
     try:
@@ -937,6 +1100,15 @@ def call_pymetis_with_part(q, adjacency_list, part=None):
     except Exception as e:
         raise ImportError(f"pymetis is not available: {e}")
 
+    if part is None:
+        # No initial partition: use pymetis directly
+        result = pymetis.part_graph(q, adjacency=adjacency_list)
+        # Handle both old (tuple) and new (namedtuple) return types
+        if hasattr(result, 'edgecut'):
+            return result.edgecut, list(result.partition)
+        return result
+    
+    # Check if pymetis supports 'part' argument
     try:
         sig = inspect.signature(pymetis.part_graph)
         params = list(sig.parameters.keys())
@@ -946,6 +1118,6 @@ def call_pymetis_with_part(q, adjacency_list, part=None):
     if 'part' in params:
         return pymetis.part_graph(q, adjacency=adjacency_list, part=part)
     else:
-        # Explicit informative warning (not silent fallback)
-        print("Warning: installed pymetis.part_graph does not accept 'part' argument; calling without initial partition", file=sys.stderr)
-        return pymetis.part_graph(q, adjacency=adjacency_list)
+        # pymetis doesn't support initial partition -> use our FM refinement
+        print(f"[INFO] pymetis.part_graph does not accept 'part'; using FM refinement (q={q}, max_passes={max_passes})", file=sys.stderr)
+        return _fm_refinement(adjacency_list, q, part, epsilon=epsilon, max_passes=max_passes)
