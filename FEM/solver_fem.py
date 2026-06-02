@@ -61,17 +61,11 @@ class Solver:
                 device=self.dev, dtype=self.dtype
             )
         else:
-# **********************************   Start   *********************************** #
             h = self.h_factor * torch.randn(
                 [self.num_trials, self.problem.num_nodes, self.q], 
                 device=self.dev, dtype=self.dtype
             )
-
-            # h = self.h_factor * torch.randn(
-            #     [self.num_trials, self.problem.num_nodes, self.q], 
-            #     device=self.dev, dtype=self.dtype
-            # )
-
+            
             # # 改进的多分类初始化
             # n_trials = self.num_trials
             # n_nodes = self.problem.num_nodes
@@ -139,9 +133,6 @@ class Solver:
                     - entropy(p) / self.betas[step]
                 free_energy.backward(gradient=torch.ones_like(free_energy)) # minimize free energy
             self.opt.step()
-
-        # self.drawer.draw_multi_step_placement()
-
         return p
 
     def solve(self):

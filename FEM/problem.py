@@ -190,8 +190,6 @@ class OptimizationProblem:
             coupling_matrix, 
             problem_type, 
             imbalance_weight=5.0, 
-            epsilon=0.03,
-            q=2,
             hyperedge=None,
             node_weights=None,
             discretization=False,
@@ -204,8 +202,6 @@ class OptimizationProblem:
         self.coupling_matrix = coupling_matrix
         self.problem_type = problem_type
         self.imbalance_weight = imbalance_weight
-        self.epsilon = epsilon
-        self.q = q
         self.hyperedge = hyperedge
         self.node_weights = node_weights
         self.discretization = discretization
@@ -219,7 +215,10 @@ class OptimizationProblem:
     def extra_preparation(self, num_trials=1, sparse=False):
         if self.problem_type == 'maxcut':
             self.c = 1 / torch.abs(self.coupling_matrix).sum(1)
-        if self.problem_type == 'bmincut' or self.problem_type == 'hyperbmincut':
+        if self.problem_type == 'bmincut':
+            self.w2 = self.coupling_matrix.square().sum()
+            self.imbalance_weight = self.imbalance_weight * self.w2 / (self.num_nodes**2)
+        if self.problem_type == 'hyperbmincut':
             self.w2 = _sparse_square_sum(self.coupling_matrix)
             if self.node_weights is None:
                 balance_mass = float(self.num_nodes)
@@ -250,7 +249,7 @@ class OptimizationProblem:
             return -expected_cut(self.coupling_matrix/2, p)
         elif self.problem_type == 'bmincut':
             return expected_bmincut(self.coupling_matrix, p) + \
-                self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)
+                self.imbalance_weight * imbalance_penalty(p)
         elif self.problem_type == 'hyperbmincut':
             expect_loss = expected_hyperbmincut(self.coupling_matrix, p, self.hyperedge)
             balance_loss = self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)

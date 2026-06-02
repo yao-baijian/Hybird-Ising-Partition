@@ -216,7 +216,7 @@ def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Option
     dummy = torch.zeros((n, n), dtype=torch.float32)
 
     fem = _FEM()
-    fem.set_up_problem(n, 0, 'customize', dummy, q=2, customize_expected_func=expected_qubo, customize_infer_func=inference_qubo)
+    fem.set_up_problem(n, 0, 'customize', dummy,customize_expected_func=expected_qubo, customize_infer_func=inference_qubo)
     fem.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=2, manual_grad=False)
 
     config, result = fem.solve()

@@ -454,7 +454,7 @@ def solve_qubo_with_fem(
     # Set up FEM problem
     fem = FEM()
     fem.set_up_problem(
-        s, 0, 'customize', Q_tensor, q=2,
+        s, 0, 'customize', Q_tensor,
         customize_expected_func=expected_qubo,
         customize_infer_func=inference_qubo
     )
