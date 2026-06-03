@@ -17,7 +17,20 @@ import torch
 import sys
 from typing import List, Tuple, Dict, Optional, Set
 from scipy.sparse import csr_matrix
+from fem import FEM
 
+# Virtual node sentinel encoding:
+#   VIRTUAL_SENTINEL = -1  marks a virtual node (the second element).
+#   When enable_virtual=True, the target partition for a virtual swap is
+#   encoded by storing -(target_part + 2) as the "vertex" value.
+#   decode: target_part = -value - 2.
+def _encode_virtual_target(target_part: int) -> int:
+    """Encode target partition as a negative sentinel value."""
+    return -(target_part + 2)
+
+def _decode_virtual_target(value: int) -> int:
+    """Decode target partition from sentinel value."""
+    return -value - 2
 
 def find_boundary_vertices(
     adjacency: List[List[Tuple[int, float]]],
@@ -236,6 +249,39 @@ def compute_swap_gain(
     return gain
 
 
+def compute_single_vertex_move_gain(
+    adjacency: List[List[Tuple[int, float]]],
+    partition: np.ndarray,
+    u: int,
+    target_part: int
+) -> float:
+    """Compute the change in edge cut if we move single vertex u to target_part.
+    
+    This is used for virtual-node swaps where only one real vertex moves.
+    
+    Args:
+        adjacency: adjacency list
+        partition: current partition assignment
+        u: vertex to move
+        target_part: target partition
+        
+    Returns:
+        Gain (positive = cut decreases, negative = cut increases)
+    """
+    my_part = partition[u]
+    if my_part == target_part:
+        return 0.0
+
+    gain = 0.0
+    for j, w in adjacency[u]:
+        part_j = partition[j]
+        if part_j == my_part:
+            gain -= w  # Lose this internal edge
+        elif part_j == target_part:
+            gain += w  # Gain this internal edge
+    return gain
+
+
 def compute_interaction_gain(
     adjacency: List[List[Tuple[int, float]]],
     partition: np.ndarray,
@@ -328,7 +374,8 @@ def compute_interaction_gain(
 def build_qubo_matrix(
     adjacency: List[List[Tuple[int, float]]],
     partition: np.ndarray,
-    candidate_pairs: List[Tuple[int, int]]
+    candidate_pairs: List[Tuple[int, int]],
+    enable_virtual: bool = False,
 ) -> np.ndarray:
     """Build the QUBO matrix for the Cyclic Expansion swap problem.
     
@@ -340,7 +387,11 @@ def build_qubo_matrix(
     Args:
         adjacency: adjacency list
         partition: current partition assignment
-        candidate_pairs: list of (u, v) candidate swap pairs
+        candidate_pairs: list of (u, v) candidate swap pairs.
+            Virtual pairs are encoded as (u, -1) where -1 marks a virtual node,
+            and the target partition is encoded via _encode_virtual_target().
+        enable_virtual: If True, virtual pairs are present in candidate_pairs
+            and their diagonal entries are computed using single-vertex move gain.
         
     Returns:
         QUBO matrix Q of shape (s, s) where s = len(candidate_pairs)
@@ -348,14 +399,40 @@ def build_qubo_matrix(
     s = len(candidate_pairs)
     Q = np.zeros((s, s), dtype=float)
     
+    def _is_virtual(val: int) -> bool:
+        """Check if a vertex value is a virtual sentinel (negative)."""
+        return val < 0
+    
     # Compute diagonal (individual gains)
     for t, (u, v) in enumerate(candidate_pairs):
-        gain = compute_swap_gain(adjacency, partition, u, v)
+        if enable_virtual and (_is_virtual(u) or _is_virtual(v)):
+            if _is_virtual(u):
+                # (virtual, real_node): real node v moves to virtual's partition
+                real_node = v
+                target_part = _decode_virtual_target(u)
+            else:
+                # (real_node, virtual): real node u moves to virtual's partition
+                real_node = u
+                target_part = _decode_virtual_target(v)
+            part_u = int(partition[real_node])
+            if target_part == part_u:
+                gain = 0.0
+            else:
+                gain = compute_single_vertex_move_gain(adjacency, partition, real_node, target_part)
+        else:
+            gain = compute_swap_gain(adjacency, partition, u, v)
         Q[t, t] = gain  # Note: we want to maximize gain, so QUBO minimizes -gain
     
-    # Compute off-diagonal (interaction gains)
+    # Compute off-diagonal (interaction gains) - only between real pairs
+    # Virtual pairs have no interaction with others (virtual node has no edges)
     for t1 in range(s):
+        u1, v1 = candidate_pairs[t1]
+        if enable_virtual and (_is_virtual(u1) or _is_virtual(v1)):
+            continue
         for t2 in range(t1 + 1, s):
+            u2, v2 = candidate_pairs[t2]
+            if enable_virtual and (_is_virtual(u2) or _is_virtual(v2)):
+                continue
             interaction = compute_interaction_gain(
                 adjacency, partition,
                 candidate_pairs[t1], candidate_pairs[t2]
@@ -386,7 +463,7 @@ def solve_qubo_with_fem(
     Returns:
         Binary assignment array of length s
     """
-    from FEM import FEM
+
     
     s = Q.shape[0]
     if s == 0:
@@ -477,6 +554,10 @@ def apply_swaps(
 ) -> np.ndarray:
     """Apply the selected swaps to the partition.
     
+    Only real pairs (both u and v are valid vertex indices) are applied.
+    Virtual pairs (encoded with sentinel -1) are ignored here and should be
+    handled by the caller.
+    
     Args:
         partition: current partition assignment
         candidate_pairs: list of (u, v) candidate pairs
@@ -488,9 +569,15 @@ def apply_swaps(
     new_partition = partition.copy()
     
     for t, (u, v) in enumerate(candidate_pairs):
-        if swap_decision[t] == 1:
-            # Swap partitions
-            new_partition[u], new_partition[v] = new_partition[v], new_partition[u]
+        if t >= len(swap_decision):
+            break
+        if swap_decision[t] != 1:
+            continue
+        if u < 0 or v < 0:
+            # Skip virtual pairs; they are applied separately by the caller
+            continue
+        # Real swap
+        new_partition[u], new_partition[v] = new_partition[v], new_partition[u]
     
     return new_partition
 
@@ -508,6 +595,7 @@ def cyclic_expansion_refine(
     verbose: bool = False,
     seed: Optional[int] = None,
     allow_nonadjacent: bool = False,
+    enable_virtual: bool = False,
 ) -> np.ndarray:
     """Run Cyclic Expansion QUBO refinement on a graph partition.
     
@@ -522,6 +610,9 @@ def cyclic_expansion_refine(
         dev: device for FEM
         patience: iterations without improvement before stopping
         seed: optional RNG seed for randomized candidate selection
+        enable_virtual: If True, add virtual nodes to balance swap groups
+            so nodes can flow to partitions with fewer elements.
+            Experimental feature.
         
     Returns:
         Refined partition assignment
@@ -551,18 +642,80 @@ def cyclic_expansion_refine(
         if len(candidate_pairs) == 0:
             break
         
-        # Build QUBO matrix
-        Q = build_qubo_matrix(adjacency, best_partition, candidate_pairs)
+        # Extend with virtual pairs if enabled
+        extended_pairs = list(candidate_pairs)
+        if enable_virtual:
+            # Compute partition sizes
+            part_sizes = {p: int(np.sum(best_partition == p)) for p in range(q)}
+            
+            # Group pairs by the partition pair they span
+            pair_groups: Dict[Tuple[int, int], List[int]] = {}
+            for t, (u, v) in enumerate(candidate_pairs):
+                pu, pv = int(best_partition[u]), int(best_partition[v])
+                key = tuple(sorted((pu, pv)))
+                if key not in pair_groups:
+                    pair_groups[key] = []
+                pair_groups[key].append(t)
+            
+            used_nodes: Set[int] = set()
+            for u, v in candidate_pairs:
+                used_nodes.add(u)
+                used_nodes.add(v)
+            
+            for (pa, pb), indices in pair_groups.items():
+                size_a = part_sizes.get(pa, 0)
+                size_b = part_sizes.get(pb, 0)
+                if size_a == size_b:
+                    continue
+                
+                # The smaller partition should receive flow from the larger one
+                smaller = pa if size_a < size_b else pb
+                larger = pb if size_a < size_b else pa
+                size_diff = abs(size_a - size_b)
+                
+                # Find boundary nodes from the larger partition not already paired
+                boundary_larger = [
+                    v for v in find_boundary_vertices(adjacency, best_partition, q)
+                    if int(best_partition[v]) == larger and v not in used_nodes
+                ]
+                
+                # Add virtual pairs encoded with target partition
+                virtual_count = min(size_diff, len(boundary_larger), len(indices))
+                rng.shuffle(boundary_larger)
+                for i in range(virtual_count):
+                    # Encode target (smaller) partition in the virtual sentinel
+                    encoded_target = _encode_virtual_target(smaller)
+                    extended_pairs.append((boundary_larger[i], encoded_target))
+                    used_nodes.add(boundary_larger[i])
+        
+        # Build QUBO matrix (may include virtual pairs)
+        Q = build_qubo_matrix(adjacency, best_partition, extended_pairs, enable_virtual=enable_virtual)
         
         # Solve QUBO with FEM
         swap_decision = solve_qubo_with_fem(Q, num_trials, num_steps, dev)
         
-        # Apply swaps and evaluate
-        new_partition = apply_swaps(best_partition, candidate_pairs, swap_decision)
+        # Apply real swaps
+        new_partition = apply_swaps(best_partition, extended_pairs, swap_decision)
+        
+        # Apply virtual swaps: move the real node to the encoded target partition
+        if enable_virtual:
+            def _is_virtual(val: int) -> bool:
+                return val < 0
+            for virt_idx, (u, v) in enumerate(extended_pairs[len(candidate_pairs):], start=len(candidate_pairs)):
+                if virt_idx < len(swap_decision) and swap_decision[virt_idx] == 1:
+                    if _is_virtual(u):
+                        # (virtual, real_node): move real node v
+                        target_part = _decode_virtual_target(u)
+                        new_partition[v] = target_part
+                    else:
+                        # (real_node, virtual): move real node u
+                        target_part = _decode_virtual_target(v)
+                        new_partition[u] = target_part
+        
         new_cut = compute_cut(adjacency, new_partition)
 
         if verbose:
-            print(f"CyclicExp iter={iteration} cand={len(candidate_pairs)} new_cut={new_cut} best_cut={best_cut}")
+            print(f"CyclicExp iter={iteration} cand={len(candidate_pairs)} virt={len(extended_pairs)-len(candidate_pairs) if enable_virtual else 0} new_cut={new_cut} best_cut={best_cut}")
 
         # Only accept strictly improving partitions. This ensures monotonicity
         # w.r.t. best_cut — longer `max_iterations` cannot worsen the returned

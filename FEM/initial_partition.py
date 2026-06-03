@@ -18,7 +18,7 @@ elsewhere in the codebase.
 from typing import Sequence, Tuple, Optional
 import numpy as np
 import torch
-
+from fem import FEM as _FEM
 
 def build_ising_A(n: int, edges: Sequence[Tuple[int,int]], weights: Sequence[float], c: np.ndarray, lambda_penalty: float) -> np.ndarray:
     """Build symmetric Ising pairwise coefficient matrix A for k=2.
@@ -86,7 +86,7 @@ def build_qubo_from_A(A: np.ndarray) -> np.ndarray:
     return Q
 
 
-def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Optional[Sequence[Tuple[int,int]]], edge_weights: Optional[Sequence[float]], c: np.ndarray, k: int = 2, lambda_penalty: float = 1.0, num_trials: int = 8, num_steps: int = 200, dev: str = 'cpu') -> np.ndarray:
+def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Optional[Sequence[Tuple[int,int]]], edge_weights: Optional[Sequence[float]], c: np.ndarray, k: int = 2, lambda_penalty: float = 1.0, num_trials: int = 8, num_steps: int = 200, dev: str = 'cpu', anneal: str = 'lin') -> np.ndarray:
     """Run FEM to obtain an initial partition on the coarse graph for k=2.
 
     This function supports two input styles for the coarse graph:
@@ -144,7 +144,7 @@ def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Option
     Q = build_qubo_from_A(A)
 
     # 3) Wrap into FEM as a customized expected energy using mean-field approximation
-    from FEM import FEM as _FEM
+    
 
     def expected_qubo(_, p: torch.Tensor) -> torch.Tensor:
         # Accept p in multiple shapes and handle flattened inputs produced
@@ -217,7 +217,7 @@ def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Option
 
     fem = _FEM()
     fem.set_up_problem(n, 0, 'customize', dummy,customize_expected_func=expected_qubo, customize_infer_func=inference_qubo)
-    fem.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=2, manual_grad=False)
+    fem.set_up_solver(num_trials, num_steps, anneal=anneal, dev=dev, q=2, manual_grad=False)
 
     config, result = fem.solve()
     # pick best config
@@ -227,7 +227,7 @@ def fem_initial_partition(coarse_adj_matrix: Optional[np.ndarray], edges: Option
     return assignment
 
 
-def fem_initial_partition_kway(coarse_adj_matrix: Optional[np.ndarray], edges: Optional[Sequence[Tuple[int,int]]], edge_weights: Optional[Sequence[float]], c: np.ndarray, k: int = 2, lambda_penalty: float = 1.0, num_trials: int = 8, num_steps: int = 200, dev: str = 'cpu') -> np.ndarray:
+def fem_initial_partition_kway(coarse_adj_matrix: Optional[np.ndarray], edges: Optional[Sequence[Tuple[int,int]]], edge_weights: Optional[Sequence[float]], c: np.ndarray, k: int = 2, lambda_penalty: float = 1.0, num_trials: int = 8, num_steps: int = 200, dev: str = 'cpu', anneal: str = 'lin') -> np.ndarray:
     """Run FEM directly in q-way bmincut mode (use FEM's bmincut implementation).
 
     This avoids recursive bisection: it constructs a FEM problem with
@@ -235,7 +235,7 @@ def fem_initial_partition_kway(coarse_adj_matrix: Optional[np.ndarray], edges: O
     discrete assignment of length n with labels in 0..k-1.
     """
     if k == 2:
-        return fem_initial_partition(coarse_adj_matrix, edges, edge_weights, c, k=2, lambda_penalty=lambda_penalty, num_trials=num_trials, num_steps=num_steps, dev=dev)
+        return fem_initial_partition(coarse_adj_matrix, edges, edge_weights, c, k=2, lambda_penalty=lambda_penalty, num_trials=num_trials, num_steps=num_steps, dev=dev, anneal=anneal)
 
     # Build adjacency as torch tensor (dense) if needed
     if coarse_adj_matrix is not None:
@@ -265,11 +265,9 @@ def fem_initial_partition_kway(coarse_adj_matrix: Optional[np.ndarray], edges: O
     except Exception:
         coupling_sparse = coupling
 
-    from FEM import FEM as _FEM
-
     num_interactions = int((coupling != 0).sum().item() // 2)
     fem = _FEM.from_couplings('bmincut', n, num_interactions, coupling_sparse, node_weights=torch.tensor(c, dtype=torch.float32))
-    fem.set_up_solver(num_trials, num_steps, dev=dev, q=k)
+    fem.set_up_solver(num_trials, num_steps, anneal=anneal, dev=dev, q=k)
     configs, results = fem.solve()
     best_idx = int(torch.argmin(results).item())
     best = configs[best_idx]

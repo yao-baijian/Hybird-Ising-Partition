@@ -2,6 +2,7 @@ import argparse
 import csv
 from collections import defaultdict
 from pathlib import Path
+from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,10 +10,9 @@ import numpy as np
 
 def configure_style():
     plt.rcParams['font.family'] = 'serif'
-    plt.rcParams['font.serif'] = ['Linux Libertine O', 'Linux Libertine', 'Times New Roman', 'DejaVu Serif']
-    plt.rcParams['axes.titlesize'] = 14
-    plt.rcParams['axes.labelsize'] = 11
-    plt.rcParams['legend.fontsize'] = 9
+    plt.rcParams['font.serif'] = ['Arial']
+    plt.rcParams['axes.labelsize'] = 12
+    plt.rcParams['legend.fontsize'] = 12
     plt.rcParams['figure.dpi'] = 120
 
 
@@ -57,24 +57,61 @@ def pastel_colors(n):
     return [cmap(i % cmap.N) for i in range(n)]
 
 
-def save_cut_plot(rows_q, q, out_dir):
+def _detect_baseline_method(rows_q):
+    """Pick the baseline method for computing improvement ratios.
+    
+    Prefers 'kahip' over 'kaffpa' over any available method.
+    """
+    methods = {r['partition_method'] for r in rows_q}
+    for preferred in ('kahip', 'kaffpa'):
+        if preferred in methods:
+            return preferred
+    return sorted(methods)[0]
+
+
+def save_cut_plot(rows_q, q, out_dir, baseline_method=None):
+    """Output improvement ratio compared to a baseline method instead of raw cut value.
+    
+    For each instance, computes: (baseline_cut - method_cut) / |baseline_cut| * 100.
+    Positive values mean the method beats the baseline (lower cut = better).
+    The baseline method itself is not plotted (always 0%).
+    """
+    if baseline_method is None:
+        baseline_method = _detect_baseline_method(rows_q)
+
     instances = sorted({r['instance'] for r in rows_q})
     methods = sorted({r['partition_method'] for r in rows_q})
 
     cut_by_key = {(r['instance'], r['partition_method']): r['cut_value'] for r in rows_q}
 
+    # Only plot non-baseline methods
+    plot_methods = [m for m in methods if m != baseline_method]
+    if not plot_methods:
+        return
+
     x = np.arange(len(instances), dtype=float)
-    width = 0.8 / max(1, len(methods))
-    colors = pastel_colors(len(methods))
+    n_methods = len(plot_methods)
+    width = min(0.8 / n_methods, 0.25)
+    colors = pastel_colors(n_methods)
 
-    fig, ax = plt.subplots(figsize=(13.5, 5.2))
+    fig, ax = plt.subplots(figsize=(12, 3))
 
-    for j, method in enumerate(methods):
-        heights = [cut_by_key.get((ins, method), np.nan) for ins in instances]
-        xpos = x - 0.4 + width * (j + 0.5)
+    for j, method in enumerate(plot_methods):
+        ratios = []
+        for ins in instances:
+            base_cut = cut_by_key.get((ins, baseline_method), None)
+            method_cut = cut_by_key.get((ins, method), None)
+            if base_cut is not None and method_cut is not None and abs(base_cut) > 1e-12:
+                # Positive = method improves over baseline
+                ratio = (base_cut - method_cut) / abs(base_cut) * 100.0
+            else:
+                ratio = np.nan
+            ratios.append(ratio)
+
+        xpos = x - (n_methods - 1) * width / 2 + j * width
         ax.bar(
             xpos,
-            heights,
+            ratios,
             width=width,
             label=method,
             color=colors[j],
@@ -82,71 +119,129 @@ def save_cut_plot(rows_q, q, out_dir):
             linewidth=0.9,
         )
 
+    ax.axhline(y=0, color='#333333', linewidth=0.8, linestyle='-')
     ax.set_xticks(x)
     ax.set_xticklabels(instances, rotation=20, ha='right')
-    ax.set_ylabel('Cut Value')
+    ax.set_ylabel(f'Cut Improvement vs {baseline_method} (%)')
     ax.set_xlabel('Instance')
     ax.grid(axis='y', alpha=0.2, linestyle='--')
-    ax.legend(loc='upper right', frameon=True)
+    ax.legend(loc='best', frameon=True)
 
-    out_file = out_dir / f'cut_comparison_q{q}.png'
-    ax.set_title(out_file.name)
+    out_file = out_dir / f'cut_improvement_q{q}.png'
     fig.tight_layout()
     fig.savefig(out_file, dpi=350, bbox_inches='tight')
     plt.close(fig)
 
 
-def aggregate_runtime_by_method(rows_q):
-    grouped = defaultdict(list)
-    for r in rows_q:
-        grouped[r['partition_method']].append(r)
-
-    methods = sorted(grouped.keys())
-    avg_coarsen = []
-    avg_init = []
-    avg_refine = []
-
-    for method in methods:
-        values = grouped[method]
-        c = float(np.mean([v['coarsen_time_s'] for v in values]))
-        i = float(np.mean([v['init_partition_time_s'] for v in values]))
-        r = float(np.mean([v['refine_time_s'] for v in values]))
-        t = float(np.mean([v['total_time_s'] for v in values]))
-
-        if method == 'direct_fem' and (c + i + r) <= 1e-12:
-            r = t
-
-        avg_coarsen.append(c)
-        avg_init.append(i)
-        avg_refine.append(r)
-
-    return methods, np.array(avg_coarsen), np.array(avg_init), np.array(avg_refine)
-
-
 def save_runtime_plot(rows_q, q, out_dir):
-    methods, coarsen, initp, refine = aggregate_runtime_by_method(rows_q)
+    """Runtime plot showing all instances × all methods in one figure.
+    
+    Produces grouped stacked bars: x-axis = instances, each group of bars = methods,
+    each bar is stacked with coarsen/init/refine time components.
+    Different hatch patterns identify each method; legend shows method ↔ pattern.
+    """
+    instances = sorted({r['instance'] for r in rows_q})
+    methods = sorted({r['partition_method'] for r in rows_q})
 
-    x = np.arange(len(methods), dtype=float)
-    width = 0.65
+    n_instances = len(instances)
+    n_methods = len(methods)
 
-    fig, ax = plt.subplots(figsize=(13.5, 5.2))
+    # Collect runtime breakdown per (instance, method)
+    time_by_key: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
+    for r in rows_q:
+        key = (r['instance'], r['partition_method'])
+        c = r['coarsen_time_s']
+        i = r['init_partition_time_s']
+        ref = r['refine_time_s']
+        if r['partition_method'] == 'direct_fem' and (c + i + ref) <= 1e-12:
+            ref = r['total_time_s']
+        time_by_key[key] = (c, i, ref)
 
-    stage_colors = ['#d7e8f7', '#c7dfd4', '#efe5c8']
+    fig, ax = plt.subplots(figsize=(max(12, n_instances * n_methods * 0.5), 4))
+
+    # Phase colors (same for all methods)
+    stage_colors = {'coarsen': '#4C72B0', 'init': '#55A868', 'refine': '#DD8452',
+                     'single': '#AAAAAA'}
+    # Distinct hatch patterns per method (cycle if more methods than patterns)
+    hatch_patterns = ['', '//', '\\\\', 'xx', '++', '..', 'oo', '**']
     edge = '#666666'
+    group_width = 0.8
+    bar_width = group_width / n_methods
 
-    ax.bar(x, coarsen, width=width, label='coarsen', color=stage_colors[0], edgecolor=edge, linewidth=0.9)
-    ax.bar(x, initp, width=width, bottom=coarsen, label='init partition', color=stage_colors[1], edgecolor=edge, linewidth=0.9)
-    ax.bar(x, refine, width=width, bottom=coarsen + initp, label='refine', color=stage_colors[2], edgecolor=edge, linewidth=0.9)
+    # Check which stages each method actually uses
+    has_phase = {}
+    for method in methods:
+        c_any = any(time_by_key.get((ins, method), (0, 0, 0))[0] > 1e-12 for ins in instances)
+        i_any = any(time_by_key.get((ins, method), (0, 0, 0))[1] > 1e-12 for ins in instances)
+        r_any = any(time_by_key.get((ins, method), (0, 0, 0))[2] > 1e-12 for ins in instances)
+        n_phases = sum([c_any, i_any, r_any])
+        has_phase[method] = (c_any, i_any, r_any, n_phases)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(methods, rotation=25, ha='right')
+    for m_idx, method in enumerate(methods):
+        hatch = hatch_patterns[m_idx % len(hatch_patterns)]
+        coarsen_vals = []
+        init_vals = []
+        refine_vals = []
+        for ins in instances:
+            c, i, ref = time_by_key.get((ins, method), (0.0, 0.0, 0.0))
+            coarsen_vals.append(c)
+            init_vals.append(i)
+            refine_vals.append(ref)
+
+        xpos = np.arange(n_instances, dtype=float) - group_width / 2 + bar_width * (m_idx + 0.5)
+        c_any, i_any, r_any, n_phases = has_phase[method]
+
+        if n_phases <= 1:
+            total_vals = [c + i + ref for c, i, ref in zip(coarsen_vals, init_vals, refine_vals)]
+            ax.bar(xpos, total_vals, width=bar_width, label=method,
+                   color=stage_colors['single'], edgecolor=edge, linewidth=0.9,
+                   hatch=hatch)
+        else:
+            ax.bar(xpos, coarsen_vals, width=bar_width,
+                   color=stage_colors['coarsen'], edgecolor=edge, linewidth=0.9,
+                   hatch=hatch)
+            ax.bar(xpos, init_vals, width=bar_width, bottom=coarsen_vals,
+                   color=stage_colors['init'], edgecolor=edge, linewidth=0.9,
+                   hatch=hatch)
+            ax.bar(xpos, refine_vals, width=bar_width,
+                   bottom=[c + i for c, i in zip(coarsen_vals, init_vals)],
+                   color=stage_colors['refine'], edgecolor=edge, linewidth=0.9,
+                   hatch=hatch)
+
+    ax.set_xticks(np.arange(n_instances, dtype=float))
+    ax.set_xticklabels(instances, rotation=20, ha='right')
     ax.set_ylabel('Time (s)')
-    ax.set_xlabel('Partition Method')
+    ax.set_xlabel('Instance')
     ax.grid(axis='y', alpha=0.2, linestyle='--')
-    ax.legend(loc='upper right', frameon=True)
+
+    # Legend: one entry per method, showing its hatch + representative color
+    from matplotlib.patches import Patch
+    method_legend = []
+    for m_idx, method in enumerate(methods):
+        hatch = hatch_patterns[m_idx % len(hatch_patterns)]
+        c_any, i_any, r_any, n_phases = has_phase[method]
+        # Use the dominant stage color for the legend patch
+        base_color = stage_colors['single'] if n_phases <= 1 else stage_colors['init']
+        method_legend.append(
+            Patch(facecolor=base_color, edgecolor=edge, hatch=hatch, label=method)
+        )
+    # Add phase color explanation
+    phase_legend = [
+        Patch(facecolor=stage_colors['coarsen'], edgecolor=edge, label='coarsen'),
+        Patch(facecolor=stage_colors['init'], edgecolor=edge, label='init'),
+        Patch(facecolor=stage_colors['refine'], edgecolor=edge, label='refine'),
+    ]
+    if any(n == 1 for _, _, _, n in has_phase.values()):
+        phase_legend.append(
+            Patch(facecolor=stage_colors['single'], edgecolor=edge, label='single phase')
+        )
+    legend1 = ax.legend(handles=method_legend, loc='upper left', frameon=True,
+                        fontsize=8, title='Method')
+    ax.add_artist(legend1)
+    ax.legend(handles=phase_legend, loc='upper right', frameon=True, fontsize=8,
+              title='Phase')
 
     out_file = out_dir / f'time_comparison_q{q}.png'
-    ax.set_title(out_file.name)
     fig.tight_layout()
     fig.savefig(out_file, dpi=350, bbox_inches='tight')
     plt.close(fig)

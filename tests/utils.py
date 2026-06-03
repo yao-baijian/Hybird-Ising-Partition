@@ -123,7 +123,8 @@ def coarsen_graph_by_matching(J: torch.Tensor, node_weights=None, max_node_weigh
         weights = np.array(node_weights, dtype=np.float32)
         
     if max_node_weight is None:
-        max_node_weight = max(weights.sum() / 50.0, np.max(weights) * 2)
+        # Scale limit so we can plausibly reach `coarsen_to` nodes
+        max_node_weight = max(weights.sum() / max(coarsen_to, 1), np.max(weights) * 2)
         
     current_J = J
     current_n = n
@@ -781,10 +782,134 @@ def greedy_initial_hypergraph_partition(
     return assignment
 
 
-def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, arg7=0, arg8=0, part=None, max_passes=10):
+def greedy_graph_grow(vwgt, xadj, adjcwgt, adjncy, q, seed=0):
+    """Greedy graph growing for initial partitioning.
+
+    Builds blocks one at a time: starts from a seed, then iteratively adds the
+    frontier vertex whose inclusion minimizes the cut increase, subject to the
+    target block size.
+
+    Args:
+        vwgt: vertex weights (list of int)
+        xadj: CSR row pointers
+        adjcwgt: CSR edge weights
+        adjncy: CSR column indices
+        q: number of blocks
+        seed: random seed
+
+    Returns:
+        (edgecut, part_list)
+    """
+    import numpy as np
+    import heapq
+
+    rng = np.random.default_rng(seed)
+    n = len(vwgt)
+    vwgt_a = np.asarray(vwgt, dtype=float)
+    total = float(vwgt_a.sum())
+    target = total / float(q)
+    part = np.full(n, -1, dtype=int)
+
+    # Build neighbor lists
+    neighbors = [[] for _ in range(n)]
+    for i in range(n):
+        for idx in range(xadj[i], xadj[i + 1]):
+            j = int(adjncy[idx])
+            w = float(adjcwgt[idx])
+            if j != i:
+                neighbors[i].append((j, w))
+
+    for block in range(q):
+        block_target = target
+        # Use remaining weight for the last block (avoids rounding errors)
+        if block == q - 1:
+            remaining = vwgt_a[part == -1].sum()
+            block_target = remaining
+
+        block_weight = 0.0
+
+        # Pick a random seed from unassigned vertices
+        unassigned = np.where(part == -1)[0]
+        if len(unassigned) == 0:
+            break
+        seed_v = int(rng.choice(unassigned))
+        part[seed_v] = block
+        block_weight += vwgt_a[seed_v]
+
+        # Priority queue: entries are (gain, vertex) where gain = -(external - internal)
+        # We use negative gain so heapq gives us the largest gain
+        heap = []
+        in_heap = set()
+        # Internal-edge weight for each vertex already in the frontier
+        internal = np.zeros(n, dtype=float)
+
+        def push_vertex(v):
+            if part[v] != -1 or v in in_heap:
+                return
+            ext = 0.0
+            for nbr, w in neighbors[v]:
+                if part[nbr] == block:
+                    internal[v] += w
+                elif part[nbr] == -1:
+                    ext += w
+                # If nbr is assigned to a different block, the edge would cross
+                # but for the growing stage we only care about edges to the
+                # growing block vs unassigned
+            # Gain = internal - external (positive = better to add)
+            gain = internal[v] - ext
+            heapq.heappush(heap, (-gain, v))
+            in_heap.add(v)
+
+        # Push neighbors of seed
+        for nbr, w in neighbors[seed_v]:
+            push_vertex(nbr)
+
+        while heap and block_weight < block_target:
+            neg_gain, v = heapq.heappop(heap)
+            in_heap.discard(v)
+            if part[v] != -1:
+                continue
+
+            # Check if adding v would exceed block_target
+            if block_weight + vwgt_a[v] > block_target and block != q - 1:
+                continue
+
+            part[v] = block
+            block_weight += vwgt_a[v]
+
+            # Push this vertex's neighbors
+            for nbr, w in neighbors[v]:
+                if part[nbr] == -1:
+                    # Recompute internal for nbr
+                    internal[nbr] = 0.0
+                    for nbr2, w2 in neighbors[nbr]:
+                        if part[nbr2] == block or nbr2 == v:
+                            internal[nbr] += w2
+                    push_vertex(nbr)
+
+    # Assign any remaining unassigned vertices
+    for block in range(q):
+        mask = (part == -1)
+        if not mask.any():
+            break
+        # Assign remaining unassigned to this block
+        part[mask] = block
+
+    # Compute cut
+    cut = 0.0
+    for i in range(n):
+        pi = part[i]
+        for j, w in neighbors[i]:
+            if i < j and pi != part[j]:
+                cut += w
+    return int(round(cut)), part.tolist()
+
+
+def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, arg7=0, arg8=0, part=None, max_passes=10, num_restarts=5):
     """
     Simple replacement for kaffpa: perform FM-style local refinement starting
-    from `part` (list of length n).
+    from `part` (list of length n).  Uses perturbation restarts to escape
+    local optima when refining an existing partition.
 
     Returns (edgecut, part_list).
     """
@@ -854,15 +979,20 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
 
         best_group = old_group
         best_delta = 0.0
+        best_balance = abs(weights[old_group] - ideal)
         for new_group in range(q):
             if new_group == old_group:
                 continue
             if weights[new_group] + vertex_weight > max_block_weight:
                 continue
             delta = float(weight_to[old_group] - weight_to[new_group])
-            if delta > best_delta:
+            new_balance = abs(weights[new_group] + vertex_weight - ideal)
+            # Allow zero-gain moves (delta >= 0) to escape local optima;
+            # tie-break toward the group closest to ideal size.
+            if delta > best_delta or (delta == best_delta and new_balance < best_balance):
                 best_delta = delta
                 best_group = new_group
+                best_balance = new_balance
         return best_group, best_delta
 
     def apply_move(parts, weights, vertex, old_group, new_group):
@@ -974,10 +1104,52 @@ def simple_kaffpa(vwgt, xadj, adjcwgt, adjncy, q, epsilon=0.05, someflag=False, 
 
         return parts, weights
 
-    part, block_weights = fm_refine(part, block_weights)
-    part, block_weights = repair_imbalance(part, block_weights)
+    # ---- Main refinement with perturbation restarts ----
+    def _run_one_fm(parts_in, weights_in):
+        p, w = fm_refine(parts_in, weights_in)
+        p, w = repair_imbalance(p, w)
+        return p, w, edgecut_of(p)
 
-    return edgecut_of(part), part
+    best_part, best_weights, best_cut = _run_one_fm(part, block_weights)
+
+    # Perturbation restarts: randomly shuffle boundary vertices to escape
+    # local optima, then run FM again.
+    for _restart in range(num_restarts):
+        # Identify boundary vertices (have neighbors in different blocks)
+        boundary = []
+        for v in range(n):
+            pv = best_part[v]
+            for nbr, _ in neighbors[v]:
+                if best_part[nbr] != pv:
+                    boundary.append(v)
+                    break
+
+        if len(boundary) < 2:
+            break
+
+        # Randomly reassign ~15% of boundary vertices to a different block
+        _np.random.shuffle(boundary)
+        perturb_count = max(1, len(boundary) // 6)
+        perturbed = best_part[:]
+        p_weights = best_weights.copy()
+        for v in boundary[:perturb_count]:
+            old = perturbed[v]
+            # Pick a random other block
+            new = int(_np.random.randint(0, q - 1))
+            if new >= old:
+                new += 1
+            perturbed[v] = new
+            vw = float(vwgt[v])
+            p_weights[old] -= vw
+            p_weights[new] += vw
+
+        p2, w2, c2 = _run_one_fm(perturbed, p_weights)
+        if c2 < best_cut:
+            best_cut = c2
+            best_part = p2
+            best_weights = w2
+
+    return best_cut, best_part
 
 
 def _fm_refinement(adjacency_list, q, part, epsilon=0.05, max_passes=10):
@@ -1128,7 +1300,7 @@ def _fm_refinement(adjacency_list, q, part, epsilon=0.05, max_passes=10):
     return edgecut_of(part), part
 
 
-def call_pymetis_with_part(q, adjacency_list, part=None, epsilon=0.05, max_passes=10):
+def call_pymetis_with_part(q, adjacency_list, part=None, epsilon=0.05, max_passes=10, verbose = False):
     """Call pymetis.part_graph with optional initial partition refinement.
     
     Since pymetis.part_graph does NOT support passing an initial partition,
@@ -1173,5 +1345,6 @@ def call_pymetis_with_part(q, adjacency_list, part=None, epsilon=0.05, max_passe
         return pymetis.part_graph(q, adjacency=adjacency_list, part=part)
     else:
         # pymetis doesn't support initial partition -> use our FM refinement
-        print(f"[INFO] pymetis.part_graph does not accept 'part'; using FM refinement (q={q}, max_passes={max_passes})", file=sys.stderr)
+        if verbose:
+            print(f"[INFO] pymetis.part_graph does not accept 'part'; using FM refinement (q={q}, max_passes={max_passes})", file=sys.stderr)
         return _fm_refinement(adjacency_list, q, part, epsilon=epsilon, max_passes=max_passes)

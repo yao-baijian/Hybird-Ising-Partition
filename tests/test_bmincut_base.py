@@ -9,10 +9,13 @@ import warnings
 import os
 import csv
 from datetime import datetime
-from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part
+from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part, greedy_graph_grow
 from fem.problem import infer_bmincut
 from fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
 from fem.initial_partition import fem_initial_partition_kway
+from fem.utils import read_graph
+from partition.kaffpa_multiway import kaffpa_multiway_kway, fem_multilevel_refine
+from typing import Dict, Tuple, Optional, List, Set
 
 try:
     import pymetis
@@ -92,6 +95,341 @@ def save_to_csv(best_rows):
             writer.writerow(row)
     print(f"Saved best results to: {csv_path}")
 
+def direct_fem(case_type, instance, index_start, num_trials, num_steps,
+               anneal, dev, q, manual_grad):
+    
+    case_bmincut = FEM.from_file(case_type, instance, index_start)
+    case_bmincut.set_up_solver(num_trials, num_steps, anneal=anneal, dev=dev, q=q, manual_grad=manual_grad)
+    
+    init_start = time.perf_counter()
+    config, result = case_bmincut.solve()
+    partition_time_s = time.perf_counter() - init_start
+    
+    optimal_inds = torch.argwhere(result==result.min()).reshape(-1)
+    p = config[optimal_inds[0]]
+    cut = result.min().item()
+    
+    J = case_bmincut.problem.coupling_matrix
+    
+    return p, cut, partition_time_s
+
+def metis_kway(J, q):
+    init_start = time.perf_counter()
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    
+    n = J.shape[0]
+    adjacency_list = [[] for _ in range(n)]
+    
+    indices = J.indices()
+    for idx in range(indices.shape[1]):
+        r = int(indices[0, idx])
+        c = int(indices[1, idx])
+        if r != c:  # no self loops
+            adjacency_list[r].append(c)
+
+    edgecuts, parts = pymetis.part_graph(q, adjacency=adjacency_list)
+    partition_time_s = time.perf_counter() - init_start
+    
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i, p_group in enumerate(parts):
+        p[i, p_group] = 1.0
+        
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+    cut = cut.item()
+
+    return p, cut, partition_time_s
+
+def coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
+    
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    n = J.shape[0]
+    
+    # 1. Multi-level coarsening
+    coarsen_start = time.perf_counter()
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+        J,
+        node_weights=torch.ones(n, dtype=torch.float32),
+        coarsen_to=coarsen_to,
+    )
+    coarsen_time_s = time.perf_counter() - coarsen_start
+    
+    num_coarse_nodes = coarse_graph.shape[0]
+    
+    # 2. FEM solver on coarse graph
+    init_start = time.perf_counter()
+    case_bmincut_coarse = FEM.from_couplings(
+        'bmincut',
+        num_coarse_nodes,
+        int(coarse_graph._nnz() // 2),
+        coarse_graph,
+        node_weights=coarse_node_weights,
+    )
+    case_bmincut_coarse.set_up_solver(num_trials, num_steps, dev=dev, q=q, anneal=anneal, manual_grad=manual_grad)
+    config, result = case_bmincut_coarse.solve()
+    
+    optimal_inds = torch.argwhere(result==result.min()).reshape(-1)
+    best_config = config[optimal_inds[0]]
+    coarse_assignment = best_config.argmax(dim=1).cpu().numpy()
+    init_partition_time_s = time.perf_counter() - init_start
+    
+    initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+    
+    refine_start = time.perf_counter()
+    adjacency_list = [[] for _ in range(n)]
+    indices = J.indices()
+    for idx in range(indices.shape[1]):
+        r = int(indices[0, idx])
+        c = int(indices[1, idx])
+        if r != c:  
+            adjacency_list[r].append(c)
+
+    edgecuts, parts = call_pymetis_with_part(q, adjacency_list, part=initial_assignment.tolist())
+    refine_time_s = time.perf_counter() - refine_start
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i, p_group in enumerate(parts):
+        p[i, p_group] = 1.0
+        
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+    
+    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
+
+def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad, penalty = 1.0):
+    """Multi-level coarsening + FEM initial partition + look-ahead FM refinement.
+    
+    Uses the same multi-level pipeline as kaffpa_multiway but replaces the
+    greedy+FM initial partition on the coarsest graph with the FEM QUBO solver.
+    """
+    return fem_multilevel_refine(
+        J, q, coarsen_to=coarsen_to,
+        epsilon=0.05,
+        refine_passes=10,
+        fem_trials=num_trials,
+        fem_steps=num_steps,
+        fem_dev=dev,
+        fem_anneal=anneal,
+        seed=42,
+        verbose=False,
+    )
+
+def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_trials=5, refine_passes=10, seed=42, verbose=False):
+    """Multi-level graph partitioning using kaffpa_multiway.
+    
+    Args:
+        J: sparse coupling matrix (n x n)
+        q: number of partitions
+        coarsen_to: target coarsest graph size
+        epsilon: allowed imbalance
+        max_coarse_rounds: max coarsening rounds
+        num_init_trials: trials for initial partition on coarsest graph
+        refine_passes: FM refinement passes per level
+        seed: random seed
+        verbose: print progress
+        
+    Returns:
+        (p, cut, coarsen_time_s, init_partition_time_s, refine_time_s)
+    """
+    return kaffpa_multiway_kway(
+        J, q, coarsen_to=coarsen_to,
+        epsilon=epsilon,
+        max_coarse_rounds=max_coarse_rounds,
+        num_init_trials=num_init_trials,
+        refine_passes=refine_passes,
+        seed=seed,
+        verbose=verbose,
+    )
+
+
+def kahip_kway(J, q, coarsen_to):
+    """Partition a graph using the KaHIP kaffpa function via the kahip Python package.
+    
+    Args:
+        J: sparse coupling matrix (n x n)
+        q: number of partitions
+        coarsen_to: target coarsening size (unused, kept for interface compatibility)
+        
+    Returns:
+        (p, cut, coarsen_time_s, init_partition_time_s, refine_time_s)
+    """
+    import kahip
+
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    n = J.shape[0]
+
+    # Build CSR using kahip_graph for proper format
+    # KaHIP expects integer edge weights, so we round float weights
+    g = kahip.kahip_graph()
+    g.set_num_nodes(n)
+
+    indices = J.indices()
+    values = J.values()
+    seen: Set[Tuple[int, int]] = set()
+    for idx in range(indices.shape[1]):
+        r = int(indices[0, idx])
+        c = int(indices[1, idx])
+        w = values[idx].item()
+        if r != c and (r, c) not in seen:
+            g.add_undirected_edge(r, c, int(round(w)))
+            seen.add((r, c))
+            seen.add((c, r))
+
+    coarsen_start = time.perf_counter()
+    coarsen_time_s = time.perf_counter() - coarsen_start
+
+    init_start = time.perf_counter()
+    vwgt, xadj, adjcwgt, adjncy = g.get_csr_arrays()
+
+    # Use ECO mode for balanced speed/quality
+    edgecut, part = kahip.kaffpa(vwgt, xadj, adjcwgt, adjncy,
+                                  q, 0.03, 0, 0, int(kahip.ECO))
+    init_partition_time_s = time.perf_counter() - init_start
+
+    refine_time_s = 0.0
+
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i, p_group in enumerate(part):
+        p[i, p_group] = 1.0
+
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+
+    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
+
+
+def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent):
+    
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    n = J.shape[0]
+
+    coarsen_start = time.perf_counter()
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+        J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
+    )
+    coarsen_time_s = time.perf_counter() - coarsen_start
+    num_coarse_nodes = coarse_graph.shape[0]
+
+    # Build adjacency list for coarse METIS
+    c_indices = coarse_graph.indices()
+    c_values = coarse_graph.values()
+    coarse_adj_list = [[] for _ in range(num_coarse_nodes)]
+    for idx in range(c_indices.shape[1]):
+        r, c = int(c_indices[0, idx]), int(c_indices[1, idx])
+        if r != c:
+            coarse_adj_list[r].append(c)
+
+    init_start = time.perf_counter()
+    edgecuts, coarse_parts = pymetis.part_graph(num_coarse_nodes and q or q, adjacency=coarse_adj_list)
+    coarse_assignment = np.array(coarse_parts)
+    init_partition_time_s = time.perf_counter() - init_start
+
+    initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+
+    # Run cyclic expansion FEM refinement on the full graph
+    refine_start = time.perf_counter()
+    adjacency = adjacency_from_sparse(J)
+    refined_assignment = cyclic_expansion_refine(
+        adjacency,
+        initial_assignment,
+        q,
+        max_iterations=max_iterations,
+        max_candidates=max_candidates,
+        num_trials=num_trials,
+        num_steps=num_steps_cyclic,
+        dev=dev,
+        patience=patience,
+        verbose=True,
+        allow_nonadjacent=allow_nonadjacent,
+    )
+    refine_time_s = time.perf_counter() - refine_start
+
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i in range(n):
+        p[i, refined_assignment[i]] = 1.0
+
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+    
+    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
+
+def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent):
+    
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    n = J.shape[0]
+
+    # Stage 1: Multi-level coarsening using matching-based coarsening
+    coarsen_start = time.perf_counter()
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+        J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
+    )
+    coarsen_time_s = time.perf_counter() - coarsen_start
+    num_coarse_nodes = coarse_graph.shape[0]
+
+    # Build adjacency for coarse graph for KaFFPa
+    coarse_adj = [[] for _ in range(num_coarse_nodes)]
+    c_indices = coarse_graph.indices()
+    c_values = coarse_graph.values()
+
+    for idx in range(c_indices.shape[1]):
+        r, c = int(c_indices[0, idx]), int(c_indices[1, idx])
+        if r != c:
+            coarse_adj[r].append((c, int(c_values[idx].item())))
+
+    c_xadj = [0]
+    c_adjncy = []
+    c_adjcwgt = []
+    for r in range(num_coarse_nodes):
+        for c, w in coarse_adj[r]:
+            c_adjncy.append(c)
+            c_adjcwgt.append(w)
+        c_xadj.append(len(c_adjncy))
+
+    c_vwgt = coarse_node_weights.int().cpu().numpy().tolist()
+
+    # Stage 2: Run KaFFPa on coarse graph to get initial q-way partition
+    init_start = time.perf_counter()
+    edgecut, coarse_assignment = simple_kaffpa(c_vwgt, c_xadj, c_adjcwgt, c_adjncy, q, epsilon=0.05, max_passes=10)
+    coarse_assignment = np.array(coarse_assignment)
+    init_partition_time_s = time.perf_counter() - init_start
+
+    # Stage 3: Project coarse partition back to original graph
+    initial_assignment = expand_coarse_labels(coarse_groups, coarse_assignment, n)
+
+    # Stage 4: Cyclic Expansion QUBO refinement using FEM
+    # Convert sparse coupling matrix to adjacency list format
+    refine_start = time.perf_counter()
+    adjacency = adjacency_from_sparse(J)
+
+    # Run Cyclic Expansion refinement
+    refined_assignment = cyclic_expansion_refine(
+        adjacency,
+        initial_assignment,
+        q,
+        max_iterations=max_iterations,
+        max_candidates=max_candidates,
+        num_trials=num_trials,
+        num_steps=num_steps_cyclic,
+        dev=dev,
+        patience=patience,
+        verbose=False,
+        allow_nonadjacent = allow_nonadjacent
+    )
+    refine_time_s = time.perf_counter() - refine_start
+
+    # Build output tensor
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i in range(n):
+        p[i, refined_assignment[i]] = 1.0
+
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+
+    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
 # FEM option
 
