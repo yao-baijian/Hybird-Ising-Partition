@@ -1,6 +1,6 @@
 import sys
 sys.path.append('.')
-from FEM import FEM, read_graph
+from fem import FEM, read_graph
 import torch
 
 num_trials = 100

@@ -1,17 +1,10 @@
 import sys
 sys.path.append('.')
 import subprocess
-from FEM import FEM
-import torch
 import pandas as pd
-import numpy as np
 import re
 import os
 import csv
-# from utils import *
-
-# num_trials = 500
-# num_steps = 1000
 
 num_trials = 200
 num_steps = 1000

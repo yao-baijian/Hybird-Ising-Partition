@@ -7,7 +7,7 @@ for path in (ROOT, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from FEM import FEM
+from fem import FEM
 import torch
 import time
 import numpy as np

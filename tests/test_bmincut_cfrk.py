@@ -1,7 +1,7 @@
 import sys
 sys.path.append('.')
 sys.path.append('tests')
-from FEM import FEM
+from fem import FEM
 import torch
 import time
 import numpy as np
@@ -10,7 +10,8 @@ import os
 import csv
 from datetime import datetime
 from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels
-from FEM.problem import infer_bmincut
+from fem.problem import infer_bmincut
+from fem.initial_partition import fem_initial_partition_kway
 
 num_trials = 1
 num_steps = 500
@@ -71,7 +72,7 @@ for instance in instances:
                 num_coarse_nodes = coarse_graph.shape[0]
 
                 # 2. FEM Initial Partition
-                from FEM.initial_partition import fem_initial_partition_kway
+                
                 init_start = time.perf_counter()
                 try:
                     try: coarse_adj_np = coarse_graph.to_dense().cpu().numpy()
