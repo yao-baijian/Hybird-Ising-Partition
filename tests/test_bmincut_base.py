@@ -113,6 +113,93 @@ def direct_fem(case_type, instance, index_start, num_trials, num_steps,
     
     return p, cut, partition_time_s
 
+
+def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
+               anneal, dev, q, manual_grad):
+    """Direct SBM solver applied to balanced k-way min-cut.
+
+    Uses Simulated Bifurcation (bsb_bmincut_batch) from sbm.py.
+    For q > 2, uses recursive bisection: repeatedly bipartitions the
+    largest remaining block until k parts are obtained.
+    """
+    from sbm.sbm import bsb_bmincut_batch
+
+    case_bmincut = FEM.from_file(case_type, instance, index_start)
+    J = case_bmincut.problem.coupling_matrix
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+
+    n = J.shape[0]
+    dt = 0.1
+
+    init_start = time.perf_counter()
+
+    if q == 2:
+        # ── Direct SB for bipartition ──
+        batch_size = num_trials
+        init_x = 2 * torch.rand(batch_size, n, device=dev) - 1
+        init_y = 2 * torch.rand(batch_size, n, device=dev) - 1
+
+        _, sol, cut_values, _ = bsb_bmincut_batch(
+            J, init_x, init_y, num_steps, dt, lambda_balance=1.0,
+        )
+        best_idx = torch.argmin(cut_values)
+        spins = sol[best_idx]
+
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+        p[spins == 1, 0] = 1.0
+        p[spins == -1, 1] = 1.0
+
+    else:
+        # ── Recursive bisection for k-way ──
+        current_part = torch.zeros(n, dtype=torch.long, device=dev)
+        n_parts = 1
+        next_label = 1
+
+        while n_parts < q:
+            sizes = torch.bincount(current_part, minlength=n_parts)
+            largest = int(torch.argmax(sizes).item())
+            mask = current_part == largest
+            sub_idx = torch.where(mask)[0]
+
+            if len(sub_idx) <= 1:
+                break
+
+            # Extract subgraph
+            J_sub = J[sub_idx][:, sub_idx]
+
+            sub_n = len(sub_idx)
+            batch_size = max(num_trials, 5)
+            init_x = 2 * torch.rand(batch_size, sub_n, device=dev) - 1
+            init_y = 2 * torch.rand(batch_size, sub_n, device=dev) - 1
+
+            _, sol_sub, cut_sub, _ = bsb_bmincut_batch(
+                J_sub, init_x, init_y, max(num_steps // n_parts, 50),
+                dt, lambda_balance=1.0,
+            )
+            best_sub = int(torch.argmin(cut_sub).item())
+            spins_sub = sol_sub[best_sub]  # +1/-1
+
+            current_part[sub_idx[spins_sub == -1]] = next_label
+            # spins_sub == +1 stays in current block (label = largest)
+            next_label += 1
+            n_parts += 1
+
+        # Build one-hot matrix
+        p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+        for i in range(n):
+            label = int(current_part[i].item())
+            p[i, min(label, q - 1)] = 1.0
+
+    partition_time_s = time.perf_counter() - init_start
+
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+    cut = cut.item()
+
+    return p, cut, partition_time_s
+
+
 def metis_kway(J, q):
     init_start = time.perf_counter()
     if not J.is_sparse:
@@ -211,6 +298,26 @@ def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
         fem_steps=num_steps,
         fem_dev=dev,
         fem_anneal=anneal,
+        seed=42,
+        verbose=False,
+    )
+
+
+def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
+    """Multi-level coarsening + SBM initial partition + look-ahead FM refinement.
+
+    Uses the same multi-level pipeline as kaffpa_multiway but replaces the
+    greedy+FM initial partition on the coarsest graph with the SBM (Simulated
+    Bifurcation) solver from sbm.py.
+    """
+    from partition.kaffpa_multiway import sbm_multilevel_refine
+    return sbm_multilevel_refine(
+        J, q, coarsen_to=coarsen_to,
+        epsilon=0.05,
+        refine_passes=10,
+        sbm_trials=num_trials,
+        sbm_steps=num_steps,
+        sbm_dev=dev,
         seed=42,
         verbose=False,
     )
@@ -431,7 +538,43 @@ def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_ite
 
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
-# FEM option
+# ── Two-level method name mapping (family: algorithm) ─────────────────────
+class MethodName:
+    """Two-level method name: family (pipeline) + algorithm (solver)."""
+    def __init__(self, family: str, algorithm: str):
+        self.family = family
+        self.algorithm = algorithm
+
+    def __str__(self):
+        return f'{self.family}: {self.algorithm}'
+
+    def __repr__(self):
+        return f'{self.family}: {self.algorithm}'
+
+    def __eq__(self, other):
+        if isinstance(other, MethodName):
+            return self.family == other.family and self.algorithm == other.algorithm
+        return str(self) == str(other)
+
+    def __hash__(self):
+        return hash(str(self))
+
+
+METHOD_NAME_MAP = {
+    'direct_fem':                MethodName('DI',   'fem'),
+    'direct_sbm':                MethodName('DI',   'sbm'),
+    'kaffpa':                    MethodName('DML',  'kaffpa'),
+    'metis':                     MethodName('DML',  'metis'),
+    'kahypar':                   MethodName('DML',  'kahypar'),
+    'kahip':                     MethodName('DML',  'kahip'),
+    'coarse_fem_refine_metis':   MethodName('IECM', 'metis'),
+    'coarse_fem_refine_kahypar': MethodName('IECM', 'kahypar'),
+    'coarse_fem_refine_kaffpa':  MethodName('IECM', 'kaffpa'),
+    'coarse_sbm_refine_kaffpa':  MethodName('IECM', 'sbm,kaffpa'),
+    'coarse_metis_refine_fem':   MethodName('MIER', 'metis'),
+    'coarse_kaffpa_refine_fem':  MethodName('MIER', 'kaffpa'),
+    'coarse_kahypar_refine_fem': MethodName('MIER', 'kahypar'),
+}
 
 
 

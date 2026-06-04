@@ -12,14 +12,13 @@ case_type = 'bmincut'
 partition_methods = [
     'direct_fem',
     'kaffpa',
-    'kahip',
     'coarse_fem_refine_kaffpa',
 ]
 
 instance_dir = '../partition/gset/'
-instances = [f'G{i}' for i in range(4, 8)]
-q_values = [2]  # Number of partitions
-coarsen_list = [50, 100]
+instances = [f'G{i}' for i in range(1, 12)]
+q_values = [2, 4, 6]  # Number of partitions
+coarsen_list = [50]
 
 best_rows = []
 

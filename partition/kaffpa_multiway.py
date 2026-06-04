@@ -420,6 +420,66 @@ def initial_partition_fem(coarse_adj, coarse_vwgt, q,
     return int(round(_edgecut_of(assign.tolist(), coarse_adj))), assign.tolist()
 
 
+def initial_partition_sbm(coarse_adj, coarse_vwgt, q,
+                           num_trials=8, num_steps=200, dev='cpu'):
+    """Initial partition via SBM (Simulated Bifurcation) on the coarse graph.
+
+    Uses bsb_bmincut_batch from sbm.py.  For q > 2, falls back to recursive
+    bisection (same logic as direct_sbm in test_bmincut_base).
+    """
+    from sbm.sbm import bsb_bmincut_batch
+
+    nc = len(coarse_adj)
+    # Build dense coupling matrix for the coarse graph
+    mat = np.zeros((nc, nc), dtype=float)
+    for i in range(nc):
+        for j, w in coarse_adj[i]:
+            mat[i, j] = w
+    J = torch.tensor(mat, dtype=torch.float32, device=dev)
+
+    dt = 0.1
+
+    if q == 2:
+        batch_size = num_trials
+        init_x = 2 * torch.rand(batch_size, nc, device=dev) - 1
+        init_y = 2 * torch.rand(batch_size, nc, device=dev) - 1
+        _, sol, cut_values, _ = bsb_bmincut_batch(
+            J, init_x, init_y, num_steps, dt, lambda_balance=1.0,
+        )
+        best_idx = int(torch.argmin(cut_values).item())
+        spins = sol[best_idx]
+        part = [0 if s == 1 else 1 for s in spins.tolist()]
+    else:
+        # Recursive bisection
+        current_part = torch.zeros(nc, dtype=torch.long, device=dev)
+        n_parts = 1
+        next_label = 1
+        while n_parts < q:
+            sizes = torch.bincount(current_part, minlength=n_parts)
+            largest = int(torch.argmax(sizes).item())
+            mask = current_part == largest
+            sub_idx = torch.where(mask)[0]
+            if len(sub_idx) <= 1:
+                break
+            J_sub = J[sub_idx][:, sub_idx]
+            sub_n = len(sub_idx)
+            bs = max(num_trials, 5)
+            i_x = 2 * torch.rand(bs, sub_n, device=dev) - 1
+            i_y = 2 * torch.rand(bs, sub_n, device=dev) - 1
+            _, sol_sub, cut_sub, _ = bsb_bmincut_batch(
+                J_sub, i_x, i_y, max(num_steps // n_parts, 50),
+                dt, lambda_balance=1.0,
+            )
+            best_sub = int(torch.argmin(cut_sub).item())
+            spins_sub = sol_sub[best_sub]
+            current_part[sub_idx[spins_sub == -1]] = next_label
+            next_label += 1
+            n_parts += 1
+        part = [min(int(c.item()), q - 1) for c in current_part]
+
+    return int(round(_edgecut_of(part, coarse_adj))), part
+
+
 # =============================================================================
 # Shared uncoarsening
 # =============================================================================
@@ -506,6 +566,7 @@ def multilevel_partition_v2(
     num_init_trials=10, refine_passes=10,
     use_fem_init=False, fem_trials=8, fem_steps=200, fem_dev='cpu', fem_anneal='lin',
     use_kahip_init=False,
+    use_sbm_init=False, sbm_trials=8, sbm_steps=200, sbm_dev='cpu',
     skip_coarsen_small=False,
     seed=42, verbose=False,
 ):
@@ -557,7 +618,11 @@ def multilevel_partition_v2(
         print(f"[ML] Coarsened {n} -> {len(coarse_adj)} nodes ({len(levels)} levels)")
 
     ti_s = time.perf_counter()
-    if use_fem_init:
+    if use_sbm_init:
+        _, part = initial_partition_sbm(coarse_adj, coarse_vwgt, q,
+                                         num_trials=sbm_trials, num_steps=sbm_steps,
+                                         dev=sbm_dev)
+    elif use_fem_init:
         _, part = initial_partition_fem(coarse_adj, coarse_vwgt, q,
                                          num_trials=fem_trials, num_steps=fem_steps,
                                          dev=fem_dev, anneal=fem_anneal)
@@ -656,6 +721,43 @@ def fem_multilevel_refine(
         use_fem_init=True,
         fem_trials=fem_trials, fem_steps=fem_steps,
         fem_dev=fem_dev, fem_anneal=fem_anneal,
+        seed=seed, verbose=verbose,
+    )
+
+    p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
+    for i, lab in enumerate(part):
+        p[i, lab] = 1.0
+    from fem.problem import infer_bmincut
+    _, cut = infer_bmincut(J, p.unsqueeze(0))
+    return p, float(cut.item()), tc, ti, tr
+
+
+def sbm_multilevel_refine(
+    J, q, coarsen_to=20,
+    epsilon=0.05, refine_passes=10,
+    sbm_trials=8, sbm_steps=200, sbm_dev='cpu',
+    seed=42, verbose=False,
+):
+    """SBM + multi-level refinement. Uses SB for coarse initial partition."""
+    if not J.is_sparse:
+        J = J.to_sparse()
+    J = J.coalesce()
+    n = J.shape[0]
+    adj = [[] for _ in range(n)]
+    idxs, vals = J.indices(), J.values()
+    for i in range(idxs.shape[1]):
+        r, c = int(idxs[0, i]), int(idxs[1, i])
+        w = float(vals[i].item())
+        if r != c:
+            adj[r].append((c, w))
+    vwgt = [1.0] * n
+
+    part, tc, ti, tr, _ = multilevel_partition_v2(
+        adj, vwgt, q,
+        coarsen_to=coarsen_to, epsilon=epsilon,
+        refine_passes=refine_passes,
+        use_sbm_init=True,
+        sbm_trials=sbm_trials, sbm_steps=sbm_steps, sbm_dev=sbm_dev,
         seed=seed, verbose=verbose,
     )
 
