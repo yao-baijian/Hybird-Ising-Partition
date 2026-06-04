@@ -407,7 +407,7 @@ def kahip_kway(J, q, coarsen_to):
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
 
-def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent):
+def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
     
     if not J.is_sparse:
         J = J.to_sparse()
@@ -450,7 +450,7 @@ def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iter
         num_steps=num_steps_cyclic,
         dev=dev,
         patience=patience,
-        verbose=True,
+        verbose=verbose,
         allow_nonadjacent=allow_nonadjacent,
     )
     refine_time_s = time.perf_counter() - refine_start
@@ -463,7 +463,7 @@ def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iter
     
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
-def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent):
+def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
     
     if not J.is_sparse:
         J = J.to_sparse()
@@ -524,7 +524,7 @@ def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_ite
         num_steps=num_steps_cyclic,
         dev=dev,
         patience=patience,
-        verbose=False,
+        verbose=verbose,
         allow_nonadjacent = allow_nonadjacent
     )
     refine_time_s = time.perf_counter() - refine_start
