@@ -243,6 +243,7 @@ def fm_refine_lookahead(
         best_dc = _edgecut_of(best_during, adj)
         max_cut_increase = 0.15 * abs(best_dc) + 1.0  # allow up to 15% cut increase
 
+        current_repair_cut = best_dc
         total_increase = 0.0
         while repair_heap and total_increase < max_cut_increase:
             imb = float(np.max(np.abs(fw - ideal) / ideal)) if ideal > 0 else 0.0
@@ -259,10 +260,12 @@ def fm_refine_lookahead(
             # Apply move
             best_global[vv] = tg
             fw[fg] -= vw_a[vv]; fw[tg] += vw_a[vv]
-            total_increase += -neg_gg  # -neg_gg is the actual cut delta
-            cc = _edgecut_of(best_global, adj)
-            if cc < best_dc:
-                best_dc, best_during = cc, list(best_global)
+            # CORRECTED: Use incremental cut update instead of O(E) _edgecut_of
+            delta = -neg_gg  # neg_gg is the cut increase, so -neg_gg is the actual delta
+            total_increase += delta
+            current_repair_cut += delta
+            if current_repair_cut < best_dc:
+                best_dc, best_during = current_repair_cut, list(best_global)
 
         # After the while loop, if we successfully reached the balance target,
         # keep the result even if the cut increased within our 15% budget.
@@ -494,8 +497,10 @@ def _uncoarsen_and_refine(levels, part, adj, vwgt, q, epsilon, refine_passes, se
             for m in members:
                 proj[m] = part[cn]
         bc = _edgecut_of(proj, lev.fine_adj)
+        # Use only 2-3 passes for intermediate levels; full passes for the final one
+        passes = 2 if li > 0 else refine_passes
         _, part = fm_refine_lookahead(proj, lev.fine_adj, lev.fine_vwgt, q,
-                                       epsilon=epsilon, max_passes=refine_passes,
+                                       epsilon=epsilon, max_passes=passes,
                                        seed=seed + li)
         if verbose:
             ac = _edgecut_of(part, lev.fine_adj)

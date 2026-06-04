@@ -525,7 +525,7 @@ def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_ite
         dev=dev,
         patience=patience,
         verbose=verbose,
-        allow_nonadjacent = allow_nonadjacent
+        allow_nonadjacent=allow_nonadjacent,
     )
     refine_time_s = time.perf_counter() - refine_start
 

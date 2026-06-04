@@ -10,14 +10,16 @@ enable_multilevel_coarsen_for_kaffpa = True
 case_type = 'bmincut'
 
 partition_methods = [
-    'direct_fem',
-    'kaffpa',
-    'coarse_fem_refine_kaffpa',
+    # 'direct_fem',
+    # 'kaffpa',
+    # 'coarse_fem_refine_kaffpa',
+    # 'coarse_metis_refine_fem',
+    'coarse_kaffpa_refine_fem',
 ]
 
 instance_dir = '../partition/gset/'
-instances = [f'G{i}' for i in range(1, 12)]
-q_values = [2, 4, 6]  # Number of partitions
+instances = [f'G{i}' for i in range(1, 5)]
+q_values = [2, 4]  # Number of partitions
 coarsen_list = [50]
 
 best_rows = []
@@ -71,10 +73,10 @@ for instance in instances:
                     num_steps_cyclic = 100
                     max_candidates=60
                     num_trials=5
-                    patience=10,
+                    patience=10
                     allow_nonadjacent = True
                     
-                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent)
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, False)
     
                 elif partition_method == 'coarse_kaffpa_refine_fem':
                     
@@ -82,10 +84,10 @@ for instance in instances:
                     num_steps_cyclic = 100
                     max_candidates=60
                     num_trials=5
-                    patience=10,
+                    patience=10
                     allow_nonadjacent = True
                     
-                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent)
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, False)
     
                 else:
                     raise ValueError(f"Unknown partition method: {partition_method}")
