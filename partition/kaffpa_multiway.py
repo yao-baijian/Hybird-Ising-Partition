@@ -61,7 +61,7 @@ def fm_refine_lookahead(
     tw = float(vw_a.sum())
     ideal = tw / float(q) if q > 0 else 0.0
     # Heavily relaxed balance during passes — 5x epsilon for exploration
-    pass_max = ideal * (1.0 + 5.0 * epsilon)
+    pass_max = ideal * (1.0 + 2.0 * epsilon)
     hard_max = ideal * (1.0 + epsilon)
 
     best_global = list(part)
@@ -91,7 +91,7 @@ def fm_refine_lookahead(
                 continue
             if weights[g] + vw_a[v] > max_w:
                 continue
-            d = wt[old] - wt[g]
+            d = wt[g] - wt[old]
             if d > bd:
                 bd, bg = d, g
         if bg == old:
@@ -102,6 +102,7 @@ def fm_refine_lookahead(
         cur = list(parts)
         cw = weights.copy()
         current_cut = _edgecut_of(cur, adj)
+        n = len(cur)
         for _ in range(passes):
             on_b = np.zeros(n, dtype=bool)
             for v in range(n):
@@ -112,7 +113,6 @@ def fm_refine_lookahead(
                         break
             locked = np.zeros(n, dtype=bool)
             start_cut = current_cut
-            best_cut, best_state, best_w = current_cut, list(cur), cw.copy()
             heap, in_h = [], np.zeros(n, dtype=bool)
 
             def _push(vv):
@@ -126,7 +126,13 @@ def fm_refine_lookahead(
             for vv in range(n):
                 if on_b[vv]:
                     _push(vv)
-            moved = False
+            if not heap:
+                break
+
+            # ---- Move history with locked vertices (standard FM) ----
+            history = []          # (v, old_g, new_g, bd)
+            cuts = [current_cut]  # cuts[0] = start; cuts[i] = cut after history[i-1]
+
             while heap:
                 nd, vv, qg = heapq.heappop(heap)
                 in_h[vv] = False
@@ -140,9 +146,13 @@ def fm_refine_lookahead(
                 if bg != qg or abs(bd + nd) > 1e-9:
                     _push(vv)
                     continue
+                # Execute move
                 cur[vv] = bg; cw[old] -= vw_a[vv]; cw[bg] += vw_a[vv]
-                locked[vv] = True; moved = True
-                current_cut -= bd  # incremental O(1)
+                current_cut -= bd
+                locked[vv] = True
+                history.append((vv, old, bg, bd))
+                cuts.append(current_cut)
+                # Update boundary
                 aff = {vv}; aff.update(nb for nb, _ in adj[vv])
                 for u in aff:
                     pu = cur[u]
@@ -150,15 +160,32 @@ def fm_refine_lookahead(
                 for u in aff:
                     if not locked[u] and on_b[u]:
                         _push(u)
-                if current_cut < best_cut:
-                    best_cut, best_state, best_w = current_cut, list(cur), cw.copy()
-            if not moved:
+
+            # Best-prefix rollback: find the prefix with minimum cut
+            if not history:
                 break
-            cur, cw = best_state, best_w
-            current_cut = best_cut
-            if best_cut >= start_cut:
+            best_idx = int(np.argmin(cuts))
+            if best_idx == 0:
+                # No improvement — restore start state
+                for i in range(len(history)):
+                    vv, old, bg, bd = history[i]
+                    if cur[vv] == bg:
+                        cur[vv] = old
+                        cw[bg] -= vw_a[vv]; cw[old] += vw_a[vv]
+                current_cut = cuts[0]
                 break
-        return best_state, best_w, best_cut
+
+            # Rollback: undo moves after best_idx
+            for i in range(len(history) - 1, best_idx - 1, -1):
+                vv, old, bg, bd = history[i]
+                if cur[vv] == bg:
+                    cur[vv] = old
+                    cw[bg] -= vw_a[vv]; cw[old] += vw_a[vv]
+            current_cut = cuts[best_idx]
+
+            if current_cut >= start_cut:
+                break
+        return cur, cw, current_cut
 
     # ---- Main: outer restarts ----
     bw = np.zeros(q, dtype=float)
@@ -237,9 +264,12 @@ def fm_refine_lookahead(
             if cc < best_dc:
                 best_dc, best_during = cc, list(best_global)
 
-        # If repair worsened cut too much, restore best during repair
-        if _edgecut_of(best_global, adj) > best_dc:
-            best_global = best_during
+        # After the while loop, if we successfully reached the balance target,
+        # keep the result even if the cut increased within our 15% budget.
+        # Only revert if we failed to reach the target AND the cut exploded.
+        final_imb = float(np.max(np.abs(fw - ideal) / ideal))
+        if final_imb > epsilon and _edgecut_of(best_global, adj) > (best_dc * 1.15):
+            best_global = best_during  # Only revert as a last resort
 
     return int(round(_edgecut_of(best_global, adj))), best_global
 
@@ -249,11 +279,23 @@ def fm_refine_lookahead(
 # =============================================================================
 
 def _he_match_one_round(adj, node_weights, max_node_weight, rng):
+    """Heavy-edge matching with degree-ordered processing.
+
+    Vertices with highest total incident weight are matched first, leading to
+    more balanced coarse nodes and better structure preservation.
+    """
     n = len(adj)
+    # Compute vertex degree (total incident edge weight)
+    deg = np.array([sum(abs(w) for _, w in d.items()) for d in adj], dtype=float)
+    # Process in descending degree order (ties broken randomly)
+    order = np.argsort(-deg, kind='stable')
+    # Add random tie-breaking
+    tie = rng.random(n)
+    order = np.lexsort((tie, -deg))
+
     matched = np.zeros(n, dtype=bool)
     coarse_of = np.full(n, -1, dtype=int)
     next_c = 0
-    order = rng.permutation(n)
     for u in order:
         if matched[u]:
             continue
@@ -270,37 +312,6 @@ def _he_match_one_round(adj, node_weights, max_node_weight, rng):
             coarse_of[u] = next_c
         next_c += 1
     return dict(enumerate(coarse_of))
-
-
-def coarsen_multilevel(adj, vwgt, coarsen_to=20, max_rounds=20, seed=42):
-    rng = np.random.default_rng(seed)
-    levels = []
-    cur_adj = [dict(nbrs) for nbrs in adj]
-    cur_vw = np.asarray(vwgt, dtype=float)
-    cur_n = len(adj)
-    for _ in range(max_rounds):
-        if cur_n <= coarsen_to:
-            break
-        max_nw = max(cur_vw.sum() / max(coarsen_to, 1), np.max(cur_vw) * 2)
-        co = _he_match_one_round(cur_adj, cur_vw, max_nw, rng)
-        grps = {}
-        for ov, nv in co.items():
-            grps.setdefault(nv, []).append(ov)
-        nc = len(grps)
-        ca = [{} for _ in range(nc)]
-        cv = np.zeros(nc, dtype=float)
-        for ci, members in grps.items():
-            for ov in members:
-                cv[ci] += cur_vw[ov]
-                for nb, ew in cur_adj[ov].items():
-                    cn = co[nb]
-                    if cn != ci:
-                        ca[ci][cn] = ca[ci].get(cn, 0.0) + ew
-        fine = [[(nb, w) for nb, w in d.items()] for d in cur_adj]
-        levels.append(CoarseningLevel(fine, list(cur_vw),
-                                       {c: m for c, m in grps.items()}))
-        cur_adj, cur_vw, cur_n = ca, cv, nc
-    return levels
 
 
 # =============================================================================
@@ -372,6 +383,25 @@ def initial_partition_greedy_fm(adj, vwgt, q, num_trials=5, seed=42):
         best_part = list(np.arange(len(adj)) % q)
         best_cut = int(1e9)
     return best_cut, best_part
+
+
+def initial_partition_kahip(adj, vwgt, q):
+    """Initial partition via kahip on the coarse graph."""
+    import kahip
+    n = len(adj)
+    g = kahip.kahip_graph()
+    g.set_num_nodes(n)
+    seen = set()
+    for i in range(n):
+        for j, w in adj[i]:
+            if (i, j) not in seen:
+                g.add_undirected_edge(i, j, int(round(w)))
+                seen.add((i, j))
+                seen.add((j, i))
+    vwgt_arr, xadj, adjcwgt, adjncy = g.get_csr_arrays()
+    _, part = kahip.kaffpa(vwgt_arr, xadj, adjcwgt, adjncy,
+                            q, 0.03, 0, 0, int(kahip.ECO))
+    return _edgecut_of(part, adj), part
 
 
 def initial_partition_fem(coarse_adj, coarse_vwgt, q,
@@ -475,13 +505,49 @@ def multilevel_partition_v2(
     coarsen_to=20, epsilon=0.05, max_coarse_rounds=20,
     num_init_trials=10, refine_passes=10,
     use_fem_init=False, fem_trials=8, fem_steps=200, fem_dev='cpu', fem_anneal='lin',
+    use_kahip_init=False,
+    skip_coarsen_small=False,
     seed=42, verbose=False,
 ):
     """Multi-level graph partition (correct version that returns coarsest adj)."""
     t0 = time.perf_counter()
     n = len(adj)
-    if n < 500:
-        coarsen_to = max(20, n // 10)
+
+    # For small graphs (n < 2000), skip coarsening — direct FM on full graph
+    if skip_coarsen_small and n < 2000:
+        if verbose:
+            print(f"[ML] n={n} < 2000, skipping coarsening, direct FM")
+        ti_s = time.perf_counter()
+        # More trials for the full graph since it's larger
+        local_trials = max(num_init_trials, 8)
+        _, part = initial_partition_greedy_fm(adj, vwgt, q,
+                                               num_trials=local_trials, seed=seed)
+        ti = time.perf_counter() - ti_s
+        tr_s = time.perf_counter()
+        # Multiple FM rounds with perturbations
+        best_part, best_cut = list(part), _edgecut_of(part, adj)
+        rng = np.random.default_rng(seed + 999)
+        for fm_round in range(3):
+            _, part = fm_refine_lookahead(part, adj, vwgt, q,
+                                           epsilon=epsilon, max_passes=refine_passes,
+                                           seed=seed + fm_round)
+            cc = _edgecut_of(part, adj)
+            if cc < best_cut:
+                best_cut, best_part = cc, list(part)
+            # Perturb and retry
+            bdry = [v for v in range(n)
+                    if any(best_part[nb] != best_part[v] for nb, _ in adj[v])]
+            if len(bdry) < 3:
+                break
+            rng.shuffle(bdry)
+            npert = max(1, len(bdry) // 10)
+            pert = list(best_part)
+            for v in bdry[:npert]:
+                old = pert[v]
+                pert[v] = (old + 1 + rng.integers(0, q - 1)) % q
+            part = pert
+        tr = time.perf_counter() - tr_s
+        return best_part, 0.0, ti, tr, time.perf_counter() - t0
 
     tc_s = time.perf_counter()
     levels, coarse_adj, coarse_vwgt = _coarsen_and_save_levels(
@@ -495,6 +561,8 @@ def multilevel_partition_v2(
         _, part = initial_partition_fem(coarse_adj, coarse_vwgt, q,
                                          num_trials=fem_trials, num_steps=fem_steps,
                                          dev=fem_dev, anneal=fem_anneal)
+    elif use_kahip_init:
+        _, part = initial_partition_kahip(coarse_adj, coarse_vwgt, q)
     else:
         _, part = initial_partition_greedy_fm(coarse_adj, coarse_vwgt, q,
                                                num_trials=num_init_trials, seed=seed)
