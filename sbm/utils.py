@@ -15,6 +15,28 @@ def load_data(name='data/Gset/G30'):
     tor_arr = -J
     return tor_arr
 
+def load_dimacs10_data(file_path):
+    with open(file_path, 'r') as file:
+        first_line = file.readline().strip()
+        while first_line == '':
+            first_line = file.readline().strip()
+        N = int(first_line.split()[0])
+        J = np.zeros((N, N), dtype=float)   # 默认权重为1，也可以改为int
+
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            u = int(parts[0]) - 1          # 转为0索引
+            for v_str in parts[1:]:
+                v = int(v_str) - 1
+                J[u][v] = 1.0
+                J[v][u] = 1.0             # 无向图对称
+
+    tor_arr = -J
+    return tor_arr
+
 def load_qplib_data(file_path):
     """
     Revised QPLIB loader based on official documentation:

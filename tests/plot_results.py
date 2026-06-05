@@ -277,7 +277,7 @@ def save_gpu_boost_plot(rows, out_dir):
     instances = sorted({r['instance'] for r in rows_with_device})
 
     for method in methods:
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(8, 3))
         ls_cycle = ['-', '--', '-.', ':']
         for qi, q in enumerate(q_values):
             speedups = []
@@ -291,7 +291,7 @@ def save_gpu_boost_plot(rows, out_dir):
                 gpu_row = next(
                     (r for r in rows_with_device
                      if r['instance'] == ins and r['q'] == q
-                     and r['partition_method'] == method and r['device'] == 'gpu'),
+                     and r['partition_method'] == method and r['device'] == 'cuda'),
                     None
                 )
                 if cpu_row is not None and gpu_row is not None and gpu_row['total_time_s'] > 0:
@@ -305,10 +305,10 @@ def save_gpu_boost_plot(rows, out_dir):
         ax.axhline(y=1, color='#999999', linewidth=0.8, linestyle='--')
         ax.set_ylabel('Speedup (CPU / GPU)', fontweight='bold')
         ax.set_xlabel('Instance', fontweight='bold')
-        ax.set_title(f'{paper_name} — GPU Speedup', fontweight='bold')
+        # ax.set_title(f'{paper_name} — GPU Speedup', fontweight='bold')
         ax.grid(axis='y', linewidth=1.4, alpha=0.5, linestyle='-')
         ax.set_axisbelow(True)
-        ax.legend(loc='best', frameon=True, fontsize=9)
+        ax.legend(loc='best', frameon=True, fontsize=10)
 
         out_file = out_dir / f'gpu_boost_{method}.png'
         fig.tight_layout()
@@ -322,8 +322,9 @@ def save_gpu_ratio_plot(rows, out_dir):
     Line plot with one figure per method; different q values as separate lines.
     Shows how much of the runtime is spent on the GPU-accelerated phase.
     """
-    rows_gpu = [r for r in rows if 'device' in r and r['device'] == 'gpu']
+    rows_gpu = [r for r in rows if 'device' in r and r['device'] == 'cuda']
     if not rows_gpu:
+        print('No GPU rows found for Plot 4.')
         return
 
     methods = sorted({r['partition_method'] for r in rows_gpu})
@@ -331,7 +332,7 @@ def save_gpu_ratio_plot(rows, out_dir):
     instances = sorted({r['instance'] for r in rows_gpu})
 
     for method in methods:
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(8, 3))
         ls_cycle = ['-', '--', '-.', ':']
         for qi, q in enumerate(q_values):
             ratios = []
@@ -352,10 +353,10 @@ def save_gpu_ratio_plot(rows, out_dir):
 
         ax.set_ylabel('GPU Init Fraction', fontweight='bold')
         ax.set_xlabel('Instance', fontweight='bold')
-        ax.set_title(f'{paper_name} — GPU Runtime Ratio', fontweight='bold')
+        # ax.set_title(f'{paper_name} — GPU Runtime Ratio', fontweight='bold')
         ax.grid(axis='y', linewidth=1.4, alpha=0.5, linestyle='-')
         ax.set_axisbelow(True)
-        ax.legend(loc='best', frameon=True, fontsize=9)
+        ax.legend(loc='best', frameon=True, fontsize=10)
 
         out_file = out_dir / f'gpu_ratio_{method}.png'
         fig.tight_layout()
@@ -418,7 +419,6 @@ def main():
         print('Plot 3 — GPU boost charts generated.')
     if 4 in plot_numbers:
         save_gpu_ratio_plot(rows, out_dir)
-        print('Plot 4 — GPU ratio charts generated.')
 
     print(f'Loaded {len(csv_files)} CSV files.')
     print(f'Output directory: {out_dir.resolve()}')

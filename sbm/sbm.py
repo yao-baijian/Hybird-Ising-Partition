@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 
-from utils import *
+from .utils import *
 
 def sb(sb_type, J, init_x, init_y, num_iters, dt):
     N = J.shape[0]
