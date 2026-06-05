@@ -113,7 +113,6 @@ def direct_fem(case_type, instance, index_start, num_trials, num_steps,
     
     return p, cut, partition_time_s
 
-
 def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
                anneal, dev, q, manual_grad, use_compile=False):
     """Direct SBM solver applied to balanced k-way min-cut.
@@ -197,7 +196,6 @@ def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
     cut = cut.item()
 
     return p, cut, partition_time_s
-
 
 def metis_kway(J, q):
     init_start = time.perf_counter()
@@ -302,7 +300,6 @@ def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
     )
     return p, cut, tc, ti, tr, coarsen_rounds
 
-
 def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
     """Multi-level coarsening + SBM initial partition + look-ahead FM refinement.
 
@@ -349,7 +346,6 @@ def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_t
         verbose=verbose,
     )
     return p, cut, tc, ti, tr, coarsen_rounds
-
 
 def kahip_kway(J, q, coarsen_to):
     """Partition a graph using the KaHIP kaffpa function via the kahip Python package.
@@ -406,7 +402,6 @@ def kahip_kway(J, q, coarsen_to):
     _, cut = infer_bmincut(J, p.unsqueeze(0))
 
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
-
 
 def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
     
