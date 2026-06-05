@@ -10,8 +10,8 @@ enable_multilevel_coarsen_for_kaffpa = True
 case_type = 'bmincut'
 
 # ── torch.compile acceleration (opt-in) ────────────────────────────────────
-compile_fem = False    # compile FEM solver's iterate loop body
-compile_sbm = False    # compile SBM's bsb_torch_batch step function
+compile_fem = True    # compile FEM solver's iterate loop body
+compile_sbm = True    # compile SBM's bsb_torch_batch step function
 
 partition_methods = [
     'direct_fem',
