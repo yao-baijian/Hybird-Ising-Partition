@@ -27,10 +27,12 @@ class Solver:
             problem, num_trials, num_steps, betamin=0.01, betamax=0.5, 
             anneal='inverse', optimizer='adam', learning_rate=0.1, dev='cpu', 
             dtype=torch.float32, seed=1, q=2, manual_grad=False, 
-            h_factor=0.01, sparse=False, drawer = None
+            h_factor=0.01, sparse=False, drawer = None,
+            use_compile=False
         ):
         self.dtype = dtype
         self.dev = dev
+        self.use_compile = use_compile
         if anneal == 'lin':
             betas = torch.linspace(betamin, betamax, num_steps)
         elif anneal == 'exp':
@@ -116,23 +118,47 @@ class Solver:
         h = self.initialize()
         self.set_up_optimizer(h)
         step_max = len(self.betas)
+        binary = self.binary
+        problem = self.problem
+        manual_grad = self.manual_grad
+        betas = self.betas
+        opt = self.opt
+        
+        # Extract entropy functions
+        if binary:
+            entropy_fn = entropy_binary
+            entropy_grad_fn = entropy_grad_binary
+        else:
+            entropy_fn = entropy_q
+            entropy_grad_fn = entropy_grad_q
+
+        if self.use_compile:
+            # Define a compiled step function for the core computation
+            @torch.compile(dynamic=True)
+            def _compiled_compute_free_energy(h, p, beta):
+                return problem.expectation(p) - entropy_fn(p) / beta
+            
+            def _compiled_compute_manual_grad(h, p, beta):
+                return problem.manual_grad(p) - entropy_grad_fn(p) / beta
+
         for step in range(step_max):
-            p = torch.sigmoid(h) if self.binary else torch.softmax(h, dim=2)
-            self.opt.zero_grad()
-            if self.binary:
-                entropy_grad = entropy_grad_binary
-                entropy = entropy_binary
+            p = torch.sigmoid(h) if binary else torch.softmax(h, dim=2)
+            opt.zero_grad()
+            
+            if self.use_compile:
+                if manual_grad:
+                    h.grad = _compiled_compute_manual_grad(h, p, betas[step])
+                else:
+                    free_energy = _compiled_compute_free_energy(h, p, betas[step])
+                    free_energy.backward(gradient=torch.ones_like(free_energy))
             else:
-                entropy_grad = entropy_grad_q
-                entropy = entropy_q
-            if self.manual_grad:
-                h.grad = self.problem.manual_grad(p) - \
-                    entropy_grad(p) / self.betas[step]
-            else:
-                free_energy = self.problem.expectation(p) \
-                    - entropy(p) / self.betas[step]
-                free_energy.backward(gradient=torch.ones_like(free_energy)) # minimize free energy
-            self.opt.step()
+                if manual_grad:
+                    h.grad = problem.manual_grad(p) - entropy_grad_fn(p) / betas[step]
+                else:
+                    free_energy = problem.expectation(p) - entropy_fn(p) / betas[step]
+                    free_energy.backward(gradient=torch.ones_like(free_energy))
+            
+            opt.step()
         return p
 
     def solve(self):

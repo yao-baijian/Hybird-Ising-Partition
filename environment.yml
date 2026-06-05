@@ -1,8 +1,19 @@
 name: fem
 channels:
     - defaults
+    - conda-forge
 dependencies:
-    - numpy=1.24.3
-    - pandas=2.1.4
-    - scipy=1.11.4
-    - python=3.10.12
+    - python>=3.10
+    - numpy>=1.24
+    - scipy>=1.11
+    - pandas>=2.1
+    - matplotlib>=3.7
+    - pytest>=7.0
+
+# ── PyTorch (install manually via pip, see https://pytorch.org/) ──────────
+# pip3 install torch torchvision torchaudio
+
+# ── Optional external partition tools (install via pip) ───────────────────
+# pip install pymetis             # METIS wrapper
+# pip install kahypar             # KaHyPar partitioner
+# pip install kahip               # KaFFPa / KaHIP partitioner

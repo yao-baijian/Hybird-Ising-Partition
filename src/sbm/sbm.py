@@ -68,16 +68,23 @@ def bsb_torch(J, init_x, init_y, num_iters, dt):
     
     return energies, sol
 
-def bsb_torch_batch(J, init_x, init_y, num_iters, dt, best_known=None, max_iters=5000):
+def _bsb_step(x_comp, y_comp, J, alpha_i, xi, dt):
+    """Single SB iteration step, extracted for optional torch.compile."""
+    Jx = torch.matmul(x_comp, J.T)
+    y_comp = y_comp + ((-1 + alpha_i) * x_comp + xi * Jx) * dt
+    x_comp = x_comp + y_comp * dt
+    boundary_mask = torch.abs(x_comp) > 1
+    y_comp = torch.where(boundary_mask, torch.zeros_like(y_comp), y_comp)
+    x_comp = torch.clamp(x_comp, -1, 1)
+    return x_comp, y_comp
+
+
+def bsb_torch_batch(J, init_x, init_y, num_iters, dt, best_known=None, max_iters=5000, use_compile=False):
     N = J.shape[0]
     batch_size = init_x.shape[0]
     x_comp = init_x.clone()
     y_comp = init_y.clone()
     xi = 4.0 / (torch.sqrt(torch.tensor(N, device=J.device, dtype=torch.float32)))
-    # xi = 0.7 / (torch.std(J) + 1e-8)   # 加小常数防止除零
-    # linear_part = torch.linspace(0, 0.999, num_iters, device=J.device)
-    # constant_part = torch.full((max_iters - num_iters,), 0.999, device=J.device)
-    # alpha = torch.cat([linear_part, constant_part])
     use_convergence_mode = best_known is not None
     
     if use_convergence_mode:
@@ -91,19 +98,11 @@ def bsb_torch_batch(J, init_x, init_y, num_iters, dt, best_known=None, max_iters
     energies = torch.zeros(batch_size, total_iterations, device=J.device)
     es = torch.zeros(batch_size, total_iterations, device=J.device)
     
-    # 主迭代循环
+    # Optionally compile the step function
+    step_fn = torch.compile(_bsb_step, dynamic=True) if use_compile else _bsb_step
+    
     for i in range(total_iterations):
-        # 计算Jx
-        Jx = torch.matmul(x_comp, J.T)
-        
-        # 更新状态
-        y_comp += ((-1 + alpha[i]) * x_comp + xi * Jx) * dt
-        x_comp += y_comp * dt
-        
-        # 边界处理
-        boundary_mask = torch.abs(x_comp) > 1
-        y_comp[boundary_mask] = 0.
-        x_comp = torch.clamp(x_comp, -1, 1)
+        x_comp, y_comp = step_fn(x_comp, y_comp, J, alpha[i], xi, dt)
         
         if use_convergence_mode:
             sol = torch.sign(x_comp)
@@ -116,7 +115,6 @@ def bsb_torch_batch(J, init_x, init_y, num_iters, dt, best_known=None, max_iters
                 return i + 1, False
 
         elif i == total_iterations - 1:
-        # 计算当前能量
             sol = torch.sign(x_comp)
             J_sol = torch.matmul(sol, J.T)
             e = -0.5 * torch.sum(sol * J_sol, dim=1)
@@ -131,7 +129,7 @@ def bsb_torch_batch(J, init_x, init_y, num_iters, dt, best_known=None, max_iters
     else:
         return energies, final_solutions, es
 
-def bsb_bmincut_batch(J, init_x, init_y, num_iters, dt, lambda_balance=1.0):
+def bsb_bmincut_batch(J, init_x, init_y, num_iters, dt, lambda_balance=1.0, use_compile=False):
     N = J.shape[0]
     batch_size = init_x.shape[0]
     
@@ -144,15 +142,10 @@ def bsb_bmincut_batch(J, init_x, init_y, num_iters, dt, lambda_balance=1.0):
     ones = torch.ones(N, device=J.device)
     J_balanced = -0.5 * J - 2.0 * lambda_balance * torch.outer(ones, ones)
     
+    step_fn = torch.compile(_bsb_step, dynamic=True) if use_compile else _bsb_step
+    
     for i in range(num_iters):
-        Jx = torch.matmul(x_comp, J_balanced.T)
-        
-        y_comp += ((-1 + alpha[i]) * x_comp + xi * Jx) * dt
-        x_comp += y_comp * dt
-        
-        boundary_mask = torch.abs(x_comp) > 1
-        y_comp[boundary_mask] = 0.
-        x_comp = torch.clamp(x_comp, -1, 1)
+        x_comp, y_comp = step_fn(x_comp, y_comp, J_balanced, alpha[i], xi, dt)
     
     orig_J = -J
     sol = torch.sign(x_comp)

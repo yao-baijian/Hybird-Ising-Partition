@@ -1,53 +1,97 @@
-# FEM
+# fem-partition
 
-`fem-partition` is a python library for solving graph partition problems using `FEM` framework. The current build-in problem types are:
-* normal graph balance minimum cut
-* hypergraph balance minimum cut
+A Python library for solving graph and hypergraph partition problems using the **QUBO** framework.
+
+## Features
+
+### Solvers
+- **FEM** (`src/fem/`) — Mean-field entropy-based optimization with simulated annealing
+- **SBM / Simulated Bifurcation** (`src/sbm/`) — Physics-inspired Ising machine solver
+- **QIS3** (`src/qis3/`) — Quantum-Inspired Solver v3: SB + Branch & Bound + Adaptive Perturbation
+
+### Problem Types
+- Balanced minimum cut (normal graph)
+- Balanced minimum cut (hypergraph)
+
+### Partition Pipelines
+Multi-level partitioning pipelines combining coarsening, FEM/SBM initial partitioning, and refinement via METIS, KaFFPa, KaHyPar, or Cyclic Expansion:
+
+| Pipeline Family | Algorithm | Description |
+|----------------|-----------|-------------|
+| DI (Direct) | `fem` / `sbm` | FEM or SBM directly on full graph |
+| DML (Direct Multi-Level) | `kaffpa` / `metis` / `kahypar` | Native tool multi-level |
+| IECM (Init + External Coarsen + Refine) | `metis` / `kaffpa` / `kahypar` | Coarsen → FEM/SBM init → External refine |
+| MIER (Multi-level Init + Ext. Refine) | `metis` / `kaffpa` / `kahypar` | External init on coarse → Cyclic Expansion FEM refine |
+
+### Acceleration
+- **`torch.compile`** support (opt-in) for FEM `Solver.iterate()` and SBM step functions
+
+## Project Structure
+
+```
+src/
+├── fem/              # Flexible Entropy Minimization solver
+├── partition/        # Multi-level partitioning pipelines
+├── sbm/              # Simulated Bifurcation Machines
+└── qis3/             # Quantum-Inspired Solver v3
+tests/                # Test suite and benchmarks
+doc/                  # Module documentation
+```
 
 ## Installation
 
-1. One can use conda to install the package with the following commands:
-    ```bash
-    conda env create -f environment.yml
-    ```
-    this will create an environment named `fem` with all the dependencies except for the pytorch, then activate the environment with `conda activate fem`.
+```bash
+# 1. Create conda environment
+conda env create -f environment.yml
+conda activate fem
 
-2. Then `pytorch` have to be installed manually with 
-    ```bash
-    pip3 install torch torchvision torchaudio
-    ```
-    see the [pytorch website](https://pytorch.org/) for more details.
+# 2. Install PyTorch (see https://pytorch.org/)
+pip3 install torch torchvision torchaudio
 
-## Recent Work / How to run the modified tests
-
-This workspace has been updated to support FEM-based coarse initial partitions
-and tool-native refinement when possible. Key test drivers updated:
-
-- `tests/test_bmincut.py` — runs several partitioning modes (direct FEM,
-    METIS, KaHyPar, KaFFPa-like). FEM now produces q-way coarse initial
-    partitions and the refiners are invoked explicitly. For KaFFPa (kahip
-    wrapper) a local replacement `simple_kaffpa` is used because the installed
-    wrapper does not accept an initial `part=` parameter.
-- `tests/test_hyper_bmincut.py` — runs hypergraph PUBO and coarsening flows.
-    When KaHyPar is available, it will be used to refine the FEM-projected
-    partition; otherwise a greedy local-refinement is applied.
-
-Run tests (example):
-
-```powershell
-python -u tests/test_bmincut.py
-python -u tests/test_hyper_bmincut.py
+# 3. Optional: external partition tools
+pip install pymetis             # METIS wrapper
+pip install kahypar             # KaHyPar
+pip install kahip               # KaFFPa/KaHIP
 ```
 
-Files of interest:
+## Running Tests
 
-- `tests/utils.py` — contains `simple_kaffpa(...)` (a small KL/FM-like local
-    refiner) and `call_pymetis_with_part(...)` which attempts to pass an
-    initial partition to `pymetis.part_graph` when supported by the wrapper.
-- `FEM/initial_partition.py` — QUBO/Ising builders and FEM integration. Use
-    `FEM.from_couplings('bmincut', q=k)` to request a q-way solver.
+Run from project root:
 
-If you'd like, I can:
-- Expand `simple_kaffpa` into a full FM implementation (bucket queue),
-- Add unit tests for the new helpers,
-- Or revert to calling native KaFFPa if you provide a compatible kaffpa wrapper.
+```powershell
+python -u tests/test_bmincut_coarsen.py     # Multi-level coarsening benchmarks
+python -u tests/test_hyper_bmincut.py       # Hypergraph bmincut tests
+python -u tests/test_bmincut_gpu_boost.py   # GPU acceleration tests
+python -u tests/plot_results.py             # Plot results (5 plot types)
+```
+
+### Partition Methods
+
+Set `partition_methods` in any test file:
+
+| Key | Description |
+|-----|-------------|
+| `'direct_fem'` | FEM directly on full graph |
+| `'direct_sbm'` | SBM directly on full graph |
+| `'kaffpa'` | KaFFPa multi-level partitioner |
+| `'coarse_fem_refine_metis'` | Coarsen → FEM init → METIS refine |
+| `'coarse_fem_refine_kaffpa'` | Coarsen → FEM init → KaFFPa refine |
+| `'coarse_metis_refine_fem'` | Coarsen → METIS init → Cyclic Expansion FEM refine |
+| `'coarse_kaffpa_refine_fem'` | Coarsen → KaFFPa init → Cyclic Expansion FEM refine |
+
+### torch.compile
+
+```python
+compile_fem = True    # compile FEM Solver.iterate()
+compile_sbm = True    # compile SBM bsb_torch_batch step function
+```
+
+## Documentation
+
+See `doc/` for detailed module documentation.
+
+## References
+
+- FEM framework: mean-field entropy minimization with annealing
+- Simulated Bifurcation: Goto et al., Science Advances (2019)
+- Cyclic Expansion: arXiv 2312.15467v1

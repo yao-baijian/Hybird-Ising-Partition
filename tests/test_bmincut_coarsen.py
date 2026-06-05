@@ -9,10 +9,15 @@ runs_per_method = 1
 enable_multilevel_coarsen_for_kaffpa = True
 case_type = 'bmincut'
 
+# ── torch.compile acceleration (opt-in) ────────────────────────────────────
+compile_fem = False    # compile FEM solver's iterate loop body
+compile_sbm = False    # compile SBM's bsb_torch_batch step function
+
 partition_methods = [
-    # 'direct_fem',
-    # 'kaffpa',
-    # 'coarse_fem_refine_kaffpa',
+    'direct_fem',
+    'direct_sbm',
+    'kaffpa',
+    'coarse_fem_refine_kaffpa',
     # 'coarse_metis_refine_fem',
     'coarse_kaffpa_refine_fem',
 ]
@@ -42,7 +47,12 @@ for instance in instances:
     
                 if partition_method == 'direct_fem':
                     
-                    p, cut, partition_time_s = direct_fem(case_type, instance_dir + instance, 1, num_trials, num_steps, anneal, dev, q, manual_grad)
+                    p, cut, partition_time_s = direct_fem(case_type, instance_dir + instance, 1, num_trials, num_steps, anneal, dev, q, manual_grad, use_compile=compile_fem)
+                    no_coarsen = True
+
+                elif partition_method == 'direct_sbm':
+                    
+                    p, cut, partition_time_s = direct_sbm(case_type, instance_dir + instance, 1, num_trials, num_steps, anneal, dev, q, manual_grad, use_compile=compile_sbm)
                     no_coarsen = True
     
                 elif partition_method == 'metis':

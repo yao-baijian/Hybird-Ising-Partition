@@ -96,10 +96,10 @@ def save_to_csv(best_rows):
     print(f"Saved best results to: {csv_path}")
 
 def direct_fem(case_type, instance, index_start, num_trials, num_steps,
-               anneal, dev, q, manual_grad):
+               anneal, dev, q, manual_grad, use_compile=False):
     
     case_bmincut = FEM.from_file(case_type, instance, index_start)
-    case_bmincut.set_up_solver(num_trials, num_steps, anneal=anneal, dev=dev, q=q, manual_grad=manual_grad)
+    case_bmincut.set_up_solver(num_trials, num_steps, anneal=anneal, dev=dev, q=q, manual_grad=manual_grad, use_compile=use_compile)
     
     init_start = time.perf_counter()
     config, result = case_bmincut.solve()
@@ -115,7 +115,7 @@ def direct_fem(case_type, instance, index_start, num_trials, num_steps,
 
 
 def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
-               anneal, dev, q, manual_grad):
+               anneal, dev, q, manual_grad, use_compile=False):
     """Direct SBM solver applied to balanced k-way min-cut.
 
     Uses Simulated Bifurcation (bsb_bmincut_batch) from sbm.py.
@@ -143,6 +143,7 @@ def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
 
         _, sol, cut_values, _ = bsb_bmincut_batch(
             J, init_x, init_y, num_steps, dt, lambda_balance=1.0,
+            use_compile=use_compile,
         )
         best_idx = torch.argmin(cut_values)
         spins = sol[best_idx]
@@ -176,7 +177,7 @@ def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
 
             _, sol_sub, cut_sub, _ = bsb_bmincut_batch(
                 J_sub, init_x, init_y, max(num_steps // n_parts, 50),
-                dt, lambda_balance=1.0,
+                dt, lambda_balance=1.0, use_compile=use_compile,
             )
             best_sub = int(torch.argmin(cut_sub).item())
             spins_sub = sol_sub[best_sub]  # +1/-1
