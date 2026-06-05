@@ -126,10 +126,6 @@ def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
 
     case_bmincut = FEM.from_file(case_type, instance, index_start)
     J = case_bmincut.problem.coupling_matrix
-    if not J.is_sparse:
-        J = J.to_sparse()
-    J = J.coalesce()
-
     n = J.shape[0]
     dt = 0.1
 

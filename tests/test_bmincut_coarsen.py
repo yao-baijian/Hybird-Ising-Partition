@@ -18,6 +18,7 @@ partition_methods = [
     'direct_sbm',
     'kaffpa',
     'coarse_fem_refine_kaffpa',
+    'coarse_sbm_refine_kaffpa',
     # 'coarse_metis_refine_fem',
     'coarse_kaffpa_refine_fem',
 ]
@@ -67,6 +68,10 @@ for instance in instances:
                 elif partition_method == 'coarse_fem_refine_kaffpa':
                     
                     p, cut, coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds = coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
+
+                elif partition_method == 'coarse_sbm_refine_kaffpa':
+                    
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds = coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
     
                 elif partition_method == 'kaffpa':
                     
