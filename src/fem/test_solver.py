@@ -1,6 +1,6 @@
 import sys
 sys.path.append('.')
-from fem import FEM
+from src.fem import FEM
 import torch
 
 num_trials = 1000

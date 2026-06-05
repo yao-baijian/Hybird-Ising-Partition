@@ -1,7 +1,7 @@
 import sys
 sys.path.append('.')
 sys.path.append('tests')
-from fem import FEM
+from src.fem import FEM
 import torch
 import time
 import numpy as np
@@ -10,8 +10,8 @@ import os
 import csv
 from datetime import datetime
 from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part
-from fem.problem import infer_bmincut
-from fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
+from src.fem.problem import infer_bmincut
+from src.fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
 
 try:
     import pymetis
@@ -143,7 +143,7 @@ for instance in instances:
                     
                     # 1. Multi-level coarsening
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J,
                         node_weights=torch.ones(n, dtype=torch.float32),
                         coarsen_to=500,
@@ -211,7 +211,7 @@ for instance in instances:
                     n = J.shape[0]
                     
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=500
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start
@@ -222,7 +222,7 @@ for instance in instances:
                     # Fall back to the previous FEM-on-coarse solver if anything fails.
                     init_start = time.perf_counter()
                     try:
-                        from fem.initial_partition import fem_initial_partition
+                        from src.fem.initial_partition import fem_initial_partition
 
                         # Convert sparse coarse_graph to dense numpy adjacency for the QUBO builder
                         try:
@@ -306,14 +306,14 @@ for instance in instances:
                     n = J.shape[0]
 
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=500
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start
                     num_coarse_nodes = coarse_graph.shape[0]
 
                     # Use FEM to produce a q-way coarse initial partition so KaFFPa only refines
-                    from fem.initial_partition import fem_initial_partition_kway
+                    from src.fem.initial_partition import fem_initial_partition_kway
                     init_start = time.perf_counter()
                     try:
                         # Convert sparse coarse_graph to dense numpy for the helper
@@ -381,7 +381,7 @@ for instance in instances:
                     n = J.shape[0]
                     
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=200
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start
@@ -454,7 +454,7 @@ for instance in instances:
                     n = J.shape[0]
 
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start
@@ -513,7 +513,7 @@ for instance in instances:
                     n = J.shape[0]
 
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start
@@ -583,7 +583,7 @@ for instance in instances:
 
                     # Stage 1: Multi-level coarsening using matching-based coarsening
                     coarsen_start = time.perf_counter()
-                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+                    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
                     )
                     coarsen_time_s = time.perf_counter() - coarsen_start

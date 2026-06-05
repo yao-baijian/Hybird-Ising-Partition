@@ -52,15 +52,15 @@ for instance in instances:
                     
                 elif partition_method == 'coarse_fem_refine_metis':
                     
-                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds = coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
     
                 elif partition_method == 'coarse_fem_refine_kaffpa':
                     
-                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s = coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds = coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad)
     
                 elif partition_method == 'kaffpa':
                     
-                    p, cut, coarsen_time_s, init_partition_time_s,refine_time_s = kaffpa_kway(J, q, coarsen_to)
+                    p, cut, coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds = kaffpa_kway(J, q, coarsen_to)
     
                 elif partition_method == 'kahip':
                     

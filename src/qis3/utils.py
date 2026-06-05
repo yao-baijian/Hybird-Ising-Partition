@@ -1,6 +1,6 @@
 # qis3_mincut.py
 import torch
-from qis3.qis3 import QIS3   # 之前定义的 QIS3 类
+from src.qis3.qis3 import QIS3   # 之前定义的 QIS3 类
 
 def qis3_bmincut_batch(J, init_x, init_y, num_iters, branch_depth=1, popsize=10, lambda_balance=1.0, device='cpu'):
     """

@@ -17,7 +17,7 @@ import torch
 import sys
 from typing import List, Tuple, Dict, Optional, Set
 from scipy.sparse import csr_matrix
-from fem import FEM
+from src.fem import FEM
 
 # Virtual node sentinel encoding:
 #   VIRTUAL_SENTINEL = -1  marks a virtual node (the second element).

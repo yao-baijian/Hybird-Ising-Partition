@@ -1,6 +1,6 @@
 import numpy as np
 
-from tests.utils import evaluate_kahypar_cut_value, greedy_refine_hypergraph_incremental
+from .hyper_utils import evaluate_kahypar_cut_value, greedy_refine_hypergraph_incremental
 
 
 def _target_counts(n, q):

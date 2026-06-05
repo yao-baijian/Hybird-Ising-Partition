@@ -5,9 +5,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from partition import coarsen_kahypar_like, coarsen_fem_refine_kahypar, evaluate_coarse_cut
-from tests.utils import expand_coarse_labels
-from tests.utils import parse_hypergraph_edges
+from src.partition import coarsen_kahypar_like, coarsen_fem_refine_kahypar, evaluate_coarse_cut
+from src.partition.coarsen import expand_coarse_labels
+from utils import parse_hypergraph_edges
 
 
 def make_real_hypergraph():

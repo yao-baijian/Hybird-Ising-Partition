@@ -5,9 +5,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import torch
-from sbm.sbm import bsb_bmincut_batch
-from sbm.utils import load_data
-from qis3.qis3 import QIS3                # 假设 qis3.py 中有 QIS3 类
+from src.sbm.sbm import bsb_bmincut_batch
+from src.sbm.utils import load_data
+from src.qis3.qis3 import QIS3                # 假设 qis3.py 中有 QIS3 类
 
 def qis3_bmincut_batch(J, init_x, init_y, num_iters, branch_depth, popsize, lambda_balance, device='cpu', qis3_batch_size=1):
     """

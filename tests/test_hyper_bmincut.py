@@ -7,16 +7,16 @@ for path in (ROOT, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from fem import FEM
+from src.fem import FEM
 import torch
 import time
 import numpy as np
 import warnings
 
-from partition import coarsen_kahypar_like as shared_kahypar_like_coarsen
-from partition import coarsen_fem_refine_kahypar as shared_fem_matching_coarsen
-from partition.helper import build_coarse_hyperedges, make_q4_pubo_object
-from partition.refine import hybrid_refine_partition
+from src.partition import coarsen_kahypar_like as shared_kahypar_like_coarsen
+from src.partition import coarsen_fem_refine_kahypar as shared_fem_matching_coarsen
+from src.partition.utils import build_coarse_hyperedges, make_q4_pubo_object
+from src.partition.hyper_refine import hybrid_refine_partition
 from utils import (
     build_clique_expanded_graph,
     coarsen_graph_by_matching,
@@ -263,7 +263,7 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
             num_coarse_nodes = coarse_graph.shape[0]
             log(f"Shared FEM matching coarsening took: {time.time() - start_time:.4f} seconds")
         else:
-            coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+            coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
                 clique_graph,
                 node_weights=torch.ones(num_nodes, dtype=torch.float32),
                 coarsen_to=500,

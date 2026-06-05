@@ -364,6 +364,60 @@ def save_gpu_ratio_plot(rows, out_dir):
         plt.close(fig)
 
 
+# ── Plot 5: Coarsening sensitivity (merged from plot_coarsening_sensitivity.py) ─
+
+def save_coarsening_sensitivity_plot(data_q, out_dir):
+    """Plot 5: Coarsening target sensitivity — cut value + runtime vs coarsen_to."""
+    for (ins, q), vals in data_q.items():
+        idx = np.argsort(vals['coarsen_to'])
+        x = np.array(vals['coarsen_to'])[idx]
+        y_cut = np.array(vals['cut_value'])[idx]
+        y_time = np.array(vals['total_time_s'])[idx]
+
+        fig, ax1 = plt.subplots(figsize=(6, 4))
+
+        color_cut = '#4c72b0'
+        color_time = '#dd8452'
+
+        ax1.set_xlabel('Coarsen Target Nodes')
+        ax1.set_ylabel('Cut Value', color=color_cut)
+        line1, = ax1.plot(x, y_cut, marker='o', color=color_cut, label='Cut Value',
+                          linewidth=1.5, markersize=5)
+        ax1.tick_params(axis='y', labelcolor=color_cut)
+        ax1.grid(True, linestyle='--', alpha=0.3)
+
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Runtime (s)', color=color_time)
+        line2, = ax2.plot(x, y_time, marker='s', color=color_time, label='Runtime',
+                          linewidth=1.5, markersize=5)
+        ax2.tick_params(axis='y', labelcolor=color_time)
+
+        lines = [line1, line2]
+        labels = [l.get_label() for l in lines]
+        ax1.legend(lines, labels, loc='upper right', frameon=True)
+
+        out_name = f'sensitivity_{ins}_q{q}.png'
+        ax1.set_title(out_name)
+
+        fig.tight_layout()
+        plt.savefig(out_dir / out_name, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {out_dir / out_name}")
+
+
+def read_sensitivity_data(csv_path):
+    from collections import defaultdict
+    data = defaultdict(lambda: defaultdict(list))
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = (row['instance'], row['q'])
+            data[key]['coarsen_to'].append(int(row['coarsen_to']))
+            data[key]['cut_value'].append(float(row['cut_value']))
+            data[key]['total_time_s'].append(float(row['total_time_s']))
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description='Plot bmincut benchmark results from CSV.')
     parser.add_argument(
@@ -382,7 +436,7 @@ def main():
         nargs='+',
         default=[1, 2],
         help='Plot types to generate: 1=cut_improvement, 2=time_comparison, '
-             '3=gpu_boost, 4=gpu_ratio. Default: 1 2',
+             '3=gpu_boost, 4=gpu_ratio, 5=coarsening_sensitivity. Default: 1 2',
     )
     args = parser.parse_args()
 
@@ -419,6 +473,19 @@ def main():
         print('Plot 3 — GPU boost charts generated.')
     if 4 in plot_numbers:
         save_gpu_ratio_plot(rows, out_dir)
+
+    # Plot 5: coarsening sensitivity — reads separate CSV files
+    if 5 in plot_numbers:
+        sensitivity_csvs = sorted(Path('.').glob('build/bmincut_cfrk_sensitivity_*.csv'))
+        if not sensitivity_csvs:
+            print('Plot 5 — no sensitivity CSV files found (pattern: build/bmincut_cfrk_sensitivity_*.csv)')
+        else:
+            all_sens_data = {}
+            for csv_file in sensitivity_csvs:
+                data = read_sensitivity_data(csv_file)
+                all_sens_data.update(data)
+            save_coarsening_sensitivity_plot(all_sens_data, out_dir)
+            print(f'Plot 5 — sensitivity charts generated from {len(sensitivity_csvs)} CSV file(s).')
 
     print(f'Loaded {len(csv_files)} CSV files.')
     print(f'Output directory: {out_dir.resolve()}')

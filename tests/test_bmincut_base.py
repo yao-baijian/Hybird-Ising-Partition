@@ -1,7 +1,7 @@
 import sys
 sys.path.append('.')
 sys.path.append('tests')
-from fem import FEM
+from src.fem import FEM
 import torch
 import time
 import numpy as np
@@ -9,12 +9,12 @@ import warnings
 import os
 import csv
 from datetime import datetime
-from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part, greedy_graph_grow
-from fem.problem import infer_bmincut
-from fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
-from fem.initial_partition import fem_initial_partition_kway
-from fem.utils import read_graph
-from partition.kaffpa_multiway import kaffpa_multiway_kway, fem_multilevel_refine
+from utils import simple_kaffpa, coarsen_graph_by_matching, expand_coarse_labels, call_pymetis_with_part
+from src.fem.problem import infer_bmincut
+from src.fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_sparse
+from src.fem.initial_partition import fem_initial_partition_kway
+from src.fem.utils import read_graph
+from src.partition.kaffpa_multiway import kaffpa_multiway_kway, fem_multilevel_refine
 from typing import Dict, Tuple, Optional, List, Set
 
 try:
@@ -122,7 +122,7 @@ def direct_sbm(case_type, instance, index_start, num_trials, num_steps,
     For q > 2, uses recursive bisection: repeatedly bipartitions the
     largest remaining block until k parts are obtained.
     """
-    from sbm.sbm import bsb_bmincut_batch
+    from src.sbm.sbm import bsb_bmincut_batch
 
     case_bmincut = FEM.from_file(case_type, instance, index_start)
     J = case_bmincut.problem.coupling_matrix
@@ -237,7 +237,7 @@ def coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev
     
     # 1. Multi-level coarsening
     coarsen_start = time.perf_counter()
-    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, coarsen_rounds = coarsen_graph_by_matching(
         J,
         node_weights=torch.ones(n, dtype=torch.float32),
         coarsen_to=coarsen_to,
@@ -282,7 +282,7 @@ def coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev
         
     _, cut = infer_bmincut(J, p.unsqueeze(0))
     
-    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
+    return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds, coarsen_rounds
 
 def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad, penalty = 1.0):
     """Multi-level coarsening + FEM initial partition + look-ahead FM refinement.
@@ -290,7 +290,7 @@ def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
     Uses the same multi-level pipeline as kaffpa_multiway but replaces the
     greedy+FM initial partition on the coarsest graph with the FEM QUBO solver.
     """
-    return fem_multilevel_refine(
+    p, cut, tc, ti, tr, coarsen_rounds = fem_multilevel_refine(
         J, q, coarsen_to=coarsen_to,
         epsilon=0.05,
         refine_passes=10,
@@ -301,6 +301,7 @@ def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
         seed=42,
         verbose=False,
     )
+    return p, cut, tc, ti, tr, coarsen_rounds
 
 
 def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
@@ -310,7 +311,7 @@ def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
     greedy+FM initial partition on the coarsest graph with the SBM (Simulated
     Bifurcation) solver from sbm.py.
     """
-    from partition.kaffpa_multiway import sbm_multilevel_refine
+    from src.partition.kaffpa_multiway import sbm_multilevel_refine
     return sbm_multilevel_refine(
         J, q, coarsen_to=coarsen_to,
         epsilon=0.05,
@@ -339,7 +340,7 @@ def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_t
     Returns:
         (p, cut, coarsen_time_s, init_partition_time_s, refine_time_s)
     """
-    return kaffpa_multiway_kway(
+    p, cut, tc, ti, tr, coarsen_rounds = kaffpa_multiway_kway(
         J, q, coarsen_to=coarsen_to,
         epsilon=epsilon,
         max_coarse_rounds=max_coarse_rounds,
@@ -348,6 +349,7 @@ def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_t
         seed=seed,
         verbose=verbose,
     )
+    return p, cut, tc, ti, tr, coarsen_rounds
 
 
 def kahip_kway(J, q, coarsen_to):
@@ -415,7 +417,7 @@ def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iter
     n = J.shape[0]
 
     coarsen_start = time.perf_counter()
-    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
     )
     coarsen_time_s = time.perf_counter() - coarsen_start
@@ -472,7 +474,7 @@ def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_ite
 
     # Stage 1: Multi-level coarsening using matching-based coarsening
     coarsen_start = time.perf_counter()
-    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse = coarsen_graph_by_matching(
+    coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
         J, node_weights=torch.ones(n, dtype=torch.float32), coarsen_to=coarsen_to
     )
     coarsen_time_s = time.perf_counter() - coarsen_start

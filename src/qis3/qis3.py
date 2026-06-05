@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from typing import Optional, Tuple
-from sbm.sbm import bsb_torch_batch
+from src.sbm.sbm import bsb_torch_batch
 
 class QIS3:
     """

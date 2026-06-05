@@ -18,7 +18,7 @@ elsewhere in the codebase.
 from typing import Sequence, Tuple, Optional
 import numpy as np
 import torch
-from fem import FEM as _FEM
+from src.fem import FEM as _FEM
 
 def build_ising_A(n: int, edges: Sequence[Tuple[int,int]], weights: Sequence[float], c: np.ndarray, lambda_penalty: float) -> np.ndarray:
     """Build symmetric Ising pairwise coefficient matrix A for k=2.

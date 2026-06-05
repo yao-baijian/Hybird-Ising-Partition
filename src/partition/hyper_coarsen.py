@@ -4,7 +4,7 @@ import math
 import numpy as np
 import torch
 
-from tests.utils import build_clique_expanded_graph, evaluate_kahypar_cut_value, greedy_initial_hypergraph_partition
+from .hyper_utils import build_clique_expanded_graph, evaluate_kahypar_cut_value, greedy_initial_hypergraph_partition
 
 
 def _build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes):
@@ -496,7 +496,7 @@ def coarsen_fem_refine_kahypar(
         Use the normal KaHyPar-like coarsening pipeline, then replace the
         initial greedy coarse partition with a FEM-based initial partition.
     """
-    from FEM import FEM as _FEM
+    from src.fem import FEM as _FEM
 
     if fem_mode not in ('fem_as_hem', 'fem_as_greedy_init'):
         raise ValueError(f"Unknown fem_mode: {fem_mode}")

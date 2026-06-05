@@ -410,7 +410,7 @@ def initial_partition_kahip(adj, vwgt, q):
 def initial_partition_fem(coarse_adj, coarse_vwgt, q,
                            num_trials=8, num_steps=200, dev='cpu', anneal='lin'):
     """Initial partition via FEM QUBO solver on the coarse graph."""
-    from fem.initial_partition import fem_initial_partition_kway
+    from src.fem.initial_partition import fem_initial_partition_kway
     nc = len(coarse_adj)
     mat = np.zeros((nc, nc), dtype=float)
     for i in range(nc):
@@ -430,7 +430,7 @@ def initial_partition_sbm(coarse_adj, coarse_vwgt, q,
     Uses bsb_bmincut_batch from sbm.py.  For q > 2, falls back to recursive
     bisection (same logic as direct_sbm in test_bmincut_base).
     """
-    from sbm.sbm import bsb_bmincut_batch
+    from src.sbm.sbm import bsb_bmincut_batch
 
     nc = len(coarse_adj)
     # Build dense coupling matrix for the coarse graph
@@ -613,14 +613,15 @@ def multilevel_partition_v2(
                 pert[v] = (old + 1 + rng.integers(0, q - 1)) % q
             part = pert
         tr = time.perf_counter() - tr_s
-        return best_part, 0.0, ti, tr, time.perf_counter() - t0
+        return best_part, 0.0, ti, tr, time.perf_counter() - t0, 0
 
     tc_s = time.perf_counter()
     levels, coarse_adj, coarse_vwgt = _coarsen_and_save_levels(
         adj, vwgt, coarsen_to, max_coarse_rounds, seed)
+    coarsen_rounds = len(levels)
     tc = time.perf_counter() - tc_s
     if verbose:
-        print(f"[ML] Coarsened {n} -> {len(coarse_adj)} nodes ({len(levels)} levels)")
+        print(f"[ML] Coarsened {n} -> {len(coarse_adj)} nodes ({coarsen_rounds} rounds)")
 
     ti_s = time.perf_counter()
     if use_sbm_init:
@@ -656,7 +657,7 @@ def multilevel_partition_v2(
         _, part = fm_refine_lookahead(part, adj, vwgt, q, epsilon=epsilon,
                                        max_passes=refine_passes, seed=seed + 5000)
 
-    return part, tc, ti, tr, tt
+    return part, tc, ti, tr, tt, coarsen_rounds
 
 
 # =============================================================================
@@ -683,7 +684,7 @@ def kaffpa_multiway_kway(
             adj[r].append((c, w))
     vwgt = [1.0] * n
 
-    part, tc, ti, tr, _ = multilevel_partition_v2(
+    part, tc, ti, tr, _, coarsen_rounds = multilevel_partition_v2(
         adj, vwgt, q,
         coarsen_to=coarsen_to, epsilon=epsilon,
         max_coarse_rounds=max_coarse_rounds,
@@ -694,9 +695,9 @@ def kaffpa_multiway_kway(
     p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
     for i, lab in enumerate(part):
         p[i, lab] = 1.0
-    from fem.problem import infer_bmincut
+    from src.fem.problem import infer_bmincut
     _, cut = infer_bmincut(J, p.unsqueeze(0))
-    return p, float(cut.item()), tc, ti, tr
+    return p, float(cut.item()), tc, ti, tr, coarsen_rounds
 
 
 def fem_multilevel_refine(
@@ -719,7 +720,7 @@ def fem_multilevel_refine(
             adj[r].append((c, w))
     vwgt = [1.0] * n
 
-    part, tc, ti, tr, _ = multilevel_partition_v2(
+    part, tc, ti, tr, _, coarsen_rounds = multilevel_partition_v2(
         adj, vwgt, q,
         coarsen_to=coarsen_to, epsilon=epsilon,
         refine_passes=refine_passes,
@@ -732,9 +733,9 @@ def fem_multilevel_refine(
     p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
     for i, lab in enumerate(part):
         p[i, lab] = 1.0
-    from fem.problem import infer_bmincut
+    from src.fem.problem import infer_bmincut
     _, cut = infer_bmincut(J, p.unsqueeze(0))
-    return p, float(cut.item()), tc, ti, tr
+    return p, float(cut.item()), tc, ti, tr, coarsen_rounds
 
 
 def sbm_multilevel_refine(
@@ -757,7 +758,7 @@ def sbm_multilevel_refine(
             adj[r].append((c, w))
     vwgt = [1.0] * n
 
-    part, tc, ti, tr, _ = multilevel_partition_v2(
+    part, tc, ti, tr, _, coarsen_rounds = multilevel_partition_v2(
         adj, vwgt, q,
         coarsen_to=coarsen_to, epsilon=epsilon,
         refine_passes=refine_passes,
@@ -769,6 +770,6 @@ def sbm_multilevel_refine(
     p = torch.zeros((n, q), dtype=J.dtype, device=J.device)
     for i, lab in enumerate(part):
         p[i, lab] = 1.0
-    from fem.problem import infer_bmincut
+    from src.fem.problem import infer_bmincut
     _, cut = infer_bmincut(J, p.unsqueeze(0))
-    return p, float(cut.item()), tc, ti, tr
+    return p, float(cut.item()), tc, ti, tr, coarsen_rounds

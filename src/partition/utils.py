@@ -15,7 +15,7 @@ def build_coarse_hyperedges(hyperedges_list, original_to_coarse_map, node_count)
 
 
 def make_q4_pubo_object(hyperedges_list, node_weights_list, cut_func, num_nodes_local, q_local, imbalance_weight=5.0):
-    from FEM.problem import weighted_imbalance_penalty
+    from src.fem.problem import weighted_imbalance_penalty
 
     class _Q4PUBO:
         def __init__(self):
