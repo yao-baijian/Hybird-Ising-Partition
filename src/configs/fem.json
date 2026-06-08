@@ -1,0 +1,13 @@
+{
+    "description": "FEM (Flexible Entropy Minimization) solver",
+    "num_trials": 10,
+    "num_steps": 1000,
+    "anneal": "lin",
+    "betamin": 0.01,
+    "betamax": 0.5,
+    "optimizer": "adam",
+    "learning_rate": 0.1,
+    "manual_grad": false,
+    "h_factor": 0.01,
+    "use_compile": false
+}

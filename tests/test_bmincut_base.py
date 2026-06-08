@@ -1,6 +1,8 @@
 import sys
-sys.path.append('.')
-sys.path.append('tests')
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]  # project root
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'tests'))
 from src.fem import FEM
 import torch
 import time
@@ -15,7 +17,11 @@ from src.fem.cyclic_expansion import cyclic_expansion_refine, adjacency_from_spa
 from src.fem.initial_partition import fem_initial_partition_kway
 from src.fem.utils import read_graph
 from src.partition.kaffpa_multiway import kaffpa_multiway_kway, fem_multilevel_refine
+from src.method_registry import registry, ensure_configs
 from typing import Dict, Tuple, Optional, List, Set
+
+# ── Ensure per-method JSON configs exist in config/ ───────────────────────
+ensure_configs()
 
 try:
     import pymetis
@@ -225,7 +231,16 @@ def metis_kway(J, q):
 
     return p, cut, partition_time_s
 
-def coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
+# ── Registry registration helpers ────────────────────────────────────────
+
+def _register_method(name, family, algorithm, run_func, description="", solver_names=None):
+    if name not in registry:
+        registry.register(name, family, algorithm, description, solver_names=solver_names)
+    registry.bind(name, run_func)
+    return name
+
+
+def init_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
     
     if not J.is_sparse:
         J = J.to_sparse()
@@ -281,7 +296,13 @@ def coarse_fem_refine_metis(J, q, coarsen_to, num_trials, num_steps, anneal, dev
     
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s, coarsen_rounds, coarsen_rounds
 
-def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad, penalty = 1.0):
+# Legacy alias
+coarse_fem_refine_metis = init_fem_refine_metis
+_register_method("init_fem_refine_metis", "IECM", "metis", init_fem_refine_metis,
+                  "Coarsen → FEM init → METIS refine", solver_names=["fem", "metis"])
+
+
+def init_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad, penalty = 1.0):
     """Multi-level coarsening + FEM initial partition + look-ahead FM refinement.
     
     Uses the same multi-level pipeline as kaffpa_multiway but replaces the
@@ -300,7 +321,7 @@ def coarse_fem_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
     )
     return p, cut, tc, ti, tr, coarsen_rounds
 
-def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
+def init_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, dev, manual_grad):
     """Multi-level coarsening + SBM initial partition + look-ahead FM refinement.
 
     Uses the same multi-level pipeline as kaffpa_multiway but replaces the
@@ -318,6 +339,10 @@ def coarse_sbm_refine_kaffpa(J, q, coarsen_to, num_trials, num_steps, anneal, de
         seed=42,
         verbose=False,
     )
+
+
+# Legacy alias
+coarse_sbm_refine_kaffpa = init_sbm_refine_kaffpa
 
 def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_trials=5, refine_passes=10, seed=42, verbose=False):
     """Multi-level graph partitioning using kaffpa_multiway.
@@ -346,6 +371,9 @@ def kaffpa_kway(J, q, coarsen_to, epsilon=0.05, max_coarse_rounds=20, num_init_t
         verbose=verbose,
     )
     return p, cut, tc, ti, tr, coarsen_rounds
+
+_register_method("kaffpa", "DML", "kaffpa", kaffpa_kway,
+                  "Multi-level KaFFPa partitioner (greedy+FM init)")
 
 def kahip_kway(J, q, coarsen_to):
     """Partition a graph using the KaHIP kaffpa function via the kahip Python package.
@@ -403,7 +431,7 @@ def kahip_kway(J, q, coarsen_to):
 
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
-def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
+def init_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
     
     if not J.is_sparse:
         J = J.to_sparse()
@@ -459,7 +487,13 @@ def coarse_metis_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iter
     
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
-def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
+# Legacy alias
+coarse_metis_refine_fem = init_metis_refine_fem
+_register_method("init_metis_refine_fem", "MIER", "metis", init_metis_refine_fem,
+                  "Coarsen → METIS init → Cyclic Expansion FEM refine")
+
+
+def init_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_iterations, num_steps_cyclic, max_candidates, num_trials, patience, allow_nonadjacent, verbose=False):
     
     if not J.is_sparse:
         J = J.to_sparse()
@@ -534,43 +568,32 @@ def coarse_kaffpa_refine_fem(J, q, coarsen_to, anneal, dev, manual_grad, max_ite
 
     return p, cut.item(), coarsen_time_s, init_partition_time_s, refine_time_s
 
-# ── Two-level method name mapping (family: algorithm) ─────────────────────
-class MethodName:
-    """Two-level method name: family (pipeline) + algorithm (solver)."""
-    def __init__(self, family: str, algorithm: str):
-        self.family = family
-        self.algorithm = algorithm
-
-    def __str__(self):
-        return f'{self.family}: {self.algorithm}'
-
-    def __repr__(self):
-        return f'{self.family}: {self.algorithm}'
-
-    def __eq__(self, other):
-        if isinstance(other, MethodName):
-            return self.family == other.family and self.algorithm == other.algorithm
-        return str(self) == str(other)
-
-    def __hash__(self):
-        return hash(str(self))
+# ── MethodName is defined in src/partition/method_registry.py ──────────────
+from src.method_registry import MethodName
 
 
-METHOD_NAME_MAP = {
-    'direct_fem':                MethodName('DI',   'fem'),
-    'direct_sbm':                MethodName('DI',   'sbm'),
-    'kaffpa':                    MethodName('DML',  'kaffpa'),
-    'metis':                     MethodName('DML',  'metis'),
-    'kahypar':                   MethodName('DML',  'kahypar'),
-    'kahip':                     MethodName('DML',  'kahip'),
-    'coarse_fem_refine_metis':   MethodName('IECM', 'metis'),
-    'coarse_fem_refine_kahypar': MethodName('IECM', 'kahypar'),
-    'coarse_fem_refine_kaffpa':  MethodName('IECM', 'kaffpa'),
-    'coarse_sbm_refine_kaffpa':  MethodName('IECM', 'sbm,kaffpa'),
-    'coarse_metis_refine_fem':   MethodName('MIER', 'metis'),
-    'coarse_kaffpa_refine_fem':  MethodName('MIER', 'kaffpa'),
-    'coarse_kahypar_refine_fem': MethodName('MIER', 'kahypar'),
-}
+# ── Register all methods in the global registry ──────────────────────────
+_register_method("direct_fem", "DI", "fem", direct_fem,
+                  "FEM directly on full graph", solver_names=["fem"])
+_register_method("direct_sbm", "DI", "sbm", direct_sbm,
+                  "SBM directly on full graph", solver_names=["sbm"])
+_register_method("init_fem_refine_metis", "IECM", "metis", init_fem_refine_metis,
+                  "Coarsen → FEM init → METIS refine", solver_names=["fem", "metis"])
+_register_method("init_fem_refine_kaffpa", "IECM", "kaffpa", init_fem_refine_kaffpa,
+                  "Coarsen → FEM init → KaFFPa refine", solver_names=["fem", "kaffpa"])
+_register_method("init_sbm_refine_kaffpa", "IECM", "sbm,kaffpa", init_sbm_refine_kaffpa,
+                  "Coarsen → SBM init → KaFFPa refine", solver_names=["sbm", "kaffpa"])
+_register_method("kaffpa", "DML", "kaffpa", kaffpa_kway,
+                  "Multi-level KaFFPa partitioner", solver_names=["kaffpa"])
+_register_method("init_metis_refine_fem", "MIER", "metis", init_metis_refine_fem,
+                  "Coarsen → METIS init → Cyclic Expansion FEM refine",
+                  solver_names=["metis", "cyclic"])
+_register_method("init_kaffpa_refine_fem", "MIER", "kaffpa", init_kaffpa_refine_fem,
+                  "Coarsen → KaFFPa init → Cyclic Expansion FEM refine",
+                  solver_names=["kaffpa", "cyclic"])
+
+# ── METHOD_NAME_MAP generated from registry ───────────────────────────────
+METHOD_NAME_MAP = {name: registry[name].method_name for name in registry.keys()}
 
 
 

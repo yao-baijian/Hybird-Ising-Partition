@@ -1,0 +1,8 @@
+{
+    "description": "KaFFPa multi-level partitioner",
+    "coarsen_to": 50,
+    "epsilon": 0.05,
+    "max_coarse_rounds": 20,
+    "num_init_trials": 5,
+    "refine_passes": 10
+}

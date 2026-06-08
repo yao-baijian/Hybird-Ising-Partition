@@ -63,8 +63,8 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
-# Flask stuff:
-instance/
+# User overrides – per-method JSON configs copied from src/partition/configs/
+config/
 .webassets-cache
 
 # Scrapy stuff:
