@@ -449,8 +449,9 @@ def _refine_flow(assignment, hyperedges, q, max_passes=5, max_imbalance=0.05,
         hyperedge_weights=[1.0] * len(hyperedges),
         q=q, max_passes=max_passes, max_imbalance=max_imbalance,
     )
-    if repair_balance and _partition_summary(result, q=q)[2] > max_imbalance:
-        result = _repair_balance(
+    _, _, current_imb = _partition_summary(result, q=q)
+    if repair_balance and current_imb > max_imbalance:
+        result = _repair_balance_fast(
             result, hyperedges, max_imbalance=max_imbalance, q=q,
         )
         if verbose:

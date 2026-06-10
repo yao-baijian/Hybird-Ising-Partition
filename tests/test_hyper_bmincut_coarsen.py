@@ -40,6 +40,9 @@ verbose = True
 fem_method = 'fem'       # 'fem' or 'pubo'
 fem_map_type = 'star'  # 'clique' or 'star'
 fem_anneal = 'lin'       # anneal schedule for FEM solver
+num_steps = 2000
+num_trials = 10
+dev = 'cpu'
 
 # ── Solver instances ─────────────────────────────────────────────────────
 # KahyparLikeSolver  → coarsening + greedy initial partition
@@ -54,9 +57,9 @@ kahypar_solver.update_params(
 
 fem_solver = FemCoarsenSolver()
 fem_solver.update_params(
-    num_trials=1,
-    num_steps=1000,
-    dev='cpu',
+    num_trials=num_trials,
+    num_steps=num_steps,
+    dev=dev,
     method=fem_method,
     map_type=fem_map_type,
     anneal=fem_anneal,
