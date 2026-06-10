@@ -314,7 +314,7 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
             log("Using Explicit q=4 PUBO on the coarsened graph...")
             coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
 
-            from FEM.customized_problem.hyper_bmincut import expected_hyperbmincut_explicit
+            from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut_explicit
 
             pubo_obj = make_q4_pubo_object(
                 coarse_hyperedges,
@@ -343,7 +343,7 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
 
         if partition_method == 'pubo_implicit':
             log("Using implicit q=4 PUBO on the coarsened graph...")
-            from FEM.customized_problem.hyper_bmincut import expected_hyperbmincut
+            from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut
 
             coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
             pubo_obj = make_q4_pubo_object(

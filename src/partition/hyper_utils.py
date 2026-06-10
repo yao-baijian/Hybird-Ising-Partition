@@ -14,9 +14,12 @@ def _sparse_coo_tensor_no_check(indices, values, size):
         return torch.sparse_coo_tensor(indices, values, size)
 
 
-def evaluate_kahypar_cut_value(assignment: np.ndarray, hyperedges: list, hyperedge_weights: list = None) -> float:
+def evaluate_kahypar_cut_value(assignment: np.ndarray, hyperedges: list, hyperedge_weights: list = None, q: int = None) -> float:
     """
     sum_{e in cut} (λ(e) - 1) * w(e)
+
+    If q is provided, imbalance is computed relative to that number of partitions.
+    Otherwise q is inferred from the assignment (max label + 1).
     """
     if hyperedge_weights is None:
         hyperedge_weights = [1.0] * len(hyperedges)
@@ -33,7 +36,8 @@ def evaluate_kahypar_cut_value(assignment: np.ndarray, hyperedges: list, hypered
             total_cut_value += (lambda_e - 1) * weight
     
     arr = np.asarray(assignment, dtype=int)
-    q = int(arr.max()) + 1
+    if q is None:
+        q = int(arr.max()) + 1
     counts = np.bincount(arr, minlength=q)
     ideal = arr.size / float(q)
     imbalance_per_group = np.abs(counts - ideal) / ideal

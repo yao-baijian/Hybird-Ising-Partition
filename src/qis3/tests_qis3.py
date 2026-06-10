@@ -1,13 +1,13 @@
-import sys
-import os
+# import sys
+# import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-import numpy as np
-import torch
-from src.sbm.sbm import bsb_bmincut_batch
-from src.sbm.utils import load_data
-from src.qis3.qis3 import QIS3                # 假设 qis3.py 中有 QIS3 类
+# import numpy as np
+# import torch
+# from src.sbm.sbm import bsb_bmincut_batch
+# from src.sbm.utils import load_data
+# from src.qis3.qis3 import QIS3                # 假设 qis3.py 中有 QIS3 类
 
 def qis3_bmincut_batch(J, init_x, init_y, num_iters, branch_depth, popsize, lambda_balance, device='cpu', qis3_batch_size=1):
     """
@@ -61,7 +61,6 @@ def qis3_bmincut_batch(J, init_x, init_y, num_iters, branch_depth, popsize, lamb
         dummy_solutions[b] = best_spin_t
     
     return dummy_energies, dummy_solutions, best_cuts, best_imbalances
-
 
 def compare_qis3_vs_bsb(device='cpu'):
     # BSB 扫描 dt
@@ -166,6 +165,55 @@ def compare_qis3_vs_bsb(device='cpu'):
     print(f"Experiment complete!")
     print(f"{'='*100}")
 
+def direct_qis3():
+    # 直接运行 QIS3，使用默认超参数，比较与 BSB 的结果
+    import numpy as np
+    import TuringQHeuristic as TQ
+    J  = np.random.randn(70,70) # 待解问题的矩阵，以一个随机矩阵为例
+    J = J.T + J ; J*=0.5 # 对称化矩阵。
+    J -= np.diag(np.diag(J)) # 去对角元矩阵。
+    h  = np.random.randn(70)
+    
+    Q  = np.random.randn(70,70) # 待解问题的矩阵，以一个随机矩阵为例
+    Q = Q.T + Q ; Q*=0.5
+
+    model1= TQ.Model()
+    model1.set_J_h(J=J,h=h)
+    model1.timeout=10
+    model1.batchsize=16
+    model1.n_iter = 1000
+    model1.fileout=False
+    model1.monitor=False
+    model1.auto_complete_init()
+
+    print("best mode:",model1.mode)
+    model1.mode=model1.mode  # 指定模式
+    model1.timeout=10 # 指定时间
+    result1 = model1.optimize() 
+
+    model2= TQ.Model()
+    model2.set_Q(Q=Q)
+    model2.timeout=10
+    model2.batchsize=16
+    model2.n_iter = 1000
+    model2.fileout=False
+    model2.monitor=False
+    model2.auto_complete_init()
+
+    print("best mode:",model2.mode)
+    model2.mode=model2.mode  # 指定模式
+    model2.timeout=10 # 指定时间
+    result2 = model2.optimize() 
+
+    print(model1.best_energy)
+    print(model1.best_state)
+    print(model1.best_state@J@model1.best_state+h@model1.best_state)
+
+    print(model2.best_energy)
+    print(model2.best_state)
+    print((model2.best_state+1)/2@Q@(model2.best_state+1)/2)
 
 if __name__ == "__main__":
-    compare_qis3_vs_bsb(device='cpu')
+    # compare_qis3_vs_bsb(device='cpu')
+    direct_qis3()
+    pass

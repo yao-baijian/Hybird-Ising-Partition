@@ -483,7 +483,7 @@ def coarsen_fem_refine_kahypar(
     num_trials=1,
     num_steps=10,
     dev='cpu',
-    verbose=False,
+    verbose=True,
     lsh_planes=4,
     lsh_tables=32,
     fem_mode='fem_as_hem',
@@ -501,14 +501,38 @@ def coarsen_fem_refine_kahypar(
     if fem_mode not in ('fem_as_hem', 'fem_as_greedy_init'):
         raise ValueError(f"Unknown fem_mode: {fem_mode}")
 
-    def _fem_initial_partition(coarse_graph, coarse_node_weights):
-        coarse_coupling = coarse_graph
-        if not coarse_coupling.is_sparse:
-            coarse_coupling = coarse_coupling.to_sparse()
-        coarse_coupling = coarse_coupling.coalesce()
-
-        num_coarse_nodes = int(coarse_coupling.shape[0])
-        num_interactions = int(coarse_coupling._nnz() // 2)
+    def _fem_initial_partition(coarse_node_weights, coarse_hyperedges):
+        # Build the pairwise coupling matrix from the coarse hyperedges via clique
+        # expansion (following read_hypergraph in src/fem/utils.py), then convert
+        # to dense so FEM's bmincut QUBO arithmetic works correctly.
+        num_coarse_nodes = len(coarse_node_weights)
+        all_pairs = []
+        all_weights = []
+        for he in coarse_hyperedges:
+            if len(he) > 1:
+                pairs = torch.combinations(torch.tensor(he, dtype=torch.long), 2)
+                all_pairs.append(pairs)
+                pair_weight = 1.0 / (len(he) - 1)
+                all_weights.append(torch.full((pairs.shape[0],), pair_weight))
+        if all_pairs:
+            indices = torch.cat(all_pairs, dim=0)
+            weights_tensor = torch.cat(all_weights, dim=0)
+            indices_sym = torch.cat([indices, indices.flip(1)], dim=0)
+            weights_sym = torch.cat([weights_tensor, weights_tensor], dim=0)
+            sparse_coupling = torch.sparse_coo_tensor(
+                indices_sym.t(), weights_sym, (num_coarse_nodes, num_coarse_nodes)
+            ).coalesce()
+            max_val = torch.max(torch.abs(sparse_coupling.values()))
+            if max_val > 0:
+                sparse_coupling = torch.sparse_coo_tensor(
+                    sparse_coupling.indices(),
+                    sparse_coupling.values() / max_val,
+                    sparse_coupling.shape,
+                ).coalesce()
+            coarse_coupling = sparse_coupling.to_dense()
+        else:
+            coarse_coupling = torch.zeros((num_coarse_nodes, num_coarse_nodes), dtype=torch.float32)
+        num_interactions = int(torch.count_nonzero(coarse_coupling).item() // 2)
 
         fem = _FEM.from_couplings(
             'bmincut',
@@ -520,7 +544,14 @@ def coarsen_fem_refine_kahypar(
         fem.set_up_solver(num_trials, num_steps, dev=dev, q=max(2, int(q)))
         configs, results = fem.solve()
         best_idx = int(torch.argmin(results).item())
-        return configs[best_idx].argmax(dim=1).cpu().numpy().astype(np.int64)
+        assignment = configs[best_idx].argmax(dim=1).cpu().numpy().astype(np.int64)
+        _, imb = evaluate_kahypar_cut_value(
+            assignment,
+            coarse_hyperedges,
+            hyperedge_weights=[1.0] * len(coarse_hyperedges),
+            q=max(2, int(q)),
+        )
+        return assignment, imb
 
     if fem_mode == 'fem_as_greedy_init':
         res = coarsen_kahypar_like(
@@ -534,7 +565,9 @@ def coarsen_fem_refine_kahypar(
             lsh_tables=lsh_tables,
             use_lsh=False,
         )
-        res['initial_assignment'] = _fem_initial_partition(res['coarse_graph'], res['coarse_node_weights'])
+        assignment, imb = _fem_initial_partition(res['coarse_node_weights'], res['coarse_hyperedges'])
+        res['initial_assignment'] = assignment
+        res['imbalance'] = imb
         return res
 
     rng = np.random.default_rng(0)
@@ -755,6 +788,6 @@ def coarsen_fem_refine_kahypar(
     }
 
 
-def evaluate_coarse_cut(coarse_hyperedges, assignment):
-    cut, imb = evaluate_kahypar_cut_value(np.asarray(assignment, dtype=int), coarse_hyperedges, hyperedge_weights=[1.0] * len(coarse_hyperedges))
+def evaluate_coarse_cut(coarse_hyperedges, assignment, q=None):
+    cut, imb = evaluate_kahypar_cut_value(np.asarray(assignment, dtype=int), coarse_hyperedges, hyperedge_weights=[1.0] * len(coarse_hyperedges), q=q)
     return cut, imb
