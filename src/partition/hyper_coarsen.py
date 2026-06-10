@@ -290,7 +290,7 @@ def _graph_to_hyperedges_from_clique(coarse_graph):
     return hyperedges
 
 
-def coarsen_kahypar_like(hyperedges, num_nodes, q=2, coarsen_to=10, verbose=False, seed=None, lsh_planes=4, lsh_tables=32, use_lsh=False):
+def coarsen_kahypar_like(hyperedges, num_nodes, q=2, coarsen_to=50, verbose=False, seed=None, lsh_planes=4, lsh_tables=32, use_lsh=False):
     """Fast KaHyPar-like coarsening with batched heavy-edge matching.
 
     The implementation avoids a global per-pair priority queue. Instead it runs
@@ -479,7 +479,7 @@ def coarsen_fem_refine_kahypar(
     hyperedges,
     num_nodes,
     q=2,
-    coarsen_to=10,
+    coarsen_to=50,
     num_trials=1,
     num_steps=10,
     dev='cpu',
@@ -535,7 +535,7 @@ def coarsen_fem_refine_kahypar(
         num_interactions = int(torch.count_nonzero(coarse_coupling).item() // 2)
 
         fem = _FEM.from_couplings(
-            'bmincut',
+            'bmincut_weighted',
             num_coarse_nodes,
             num_interactions,
             coarse_coupling,

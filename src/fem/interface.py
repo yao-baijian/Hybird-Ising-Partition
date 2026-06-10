@@ -37,7 +37,7 @@ class FEM:
             customize_infer_func=None
         ):
         supported_types = [
-            'maxcut', 'bmincut', 'hyperbmincut', 'modularity', 'maxksat', 'vertexcover', 'customize'
+            'maxcut', 'bmincut', 'bmincut_weighted', 'hyperbmincut', 'modularity', 'maxksat', 'vertexcover', 'customize'
         ]
         if problem_type not in supported_types:
             raise ValueError(

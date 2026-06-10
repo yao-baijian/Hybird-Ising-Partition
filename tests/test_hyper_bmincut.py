@@ -13,14 +13,20 @@ import time
 import numpy as np
 import warnings
 
-from src.partition import coarsen_kahypar_like as shared_kahypar_like_coarsen
-from src.partition import coarsen_fem_refine_kahypar as shared_fem_matching_coarsen
+from src.hyper_solver import (
+    KahyparLikeSolver,
+    FemCoarsenSolver,
+    HyperRefineSolver,
+)
 from src.partition.utils import build_coarse_hyperedges, make_q4_pubo_object
-from src.partition.hyper_refine import hybrid_refine_partition
 from utils import (
+    _compute_summary,
+    _log,
+    _parse_run_label,
+    _print_results_table,
+    _print_result_row,
     build_clique_expanded_graph,
     coarsen_graph_by_matching,
-    evaluate_kahypar_cut_value,
     expand_coarse_labels,
     greedy_refine_hypergraph_incremental,
     parse_hypergraph_edges,
@@ -44,7 +50,7 @@ except ImportError:
 
 
 num_trials = 1
-num_steps = 80
+num_steps = 200
 dev = 'cpu'
 instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
 
@@ -71,115 +77,55 @@ partition_runs = [
 ]
 
 verbose = True
-
-# Whether to use LSH pre-clustering before Heavy Edge Matching.
-# When False (default for kahyper_like_no_lsh), HEM runs directly on the original hypergraph.
-# When True, MinHash/LSH is used to bucket similar vertices first.
 use_lsh = False
+coarsen_to = 100
 
 
-def _log(message, enabled=False):
-    if enabled:
-        print(message)
+# ── Solver instances (shared across methods) ─────────────────────────────
+# KahyparLikeSolver does coarsening + greedy initial partition.
+# FemCoarsenSolver does FEM-based initial partition (no coarsening).
+
+_kahypar_solver = KahyparLikeSolver()
+_kahypar_solver.update_params(coarsen_to=coarsen_to, verbose=verbose, use_lsh=use_lsh)
+
+_fem_solver = FemCoarsenSolver()
+_fem_solver.update_params(
+    num_trials=num_trials, num_steps=num_steps, dev=dev,
+)
+
+_kahypar_refine_solver = HyperRefineSolver()
+_kahypar_refine_solver.update_params(mode_cycle=('flow', 'mcts', 'evolution'), rounds=3)
+
+_fem_refine_solver = HyperRefineSolver()
+_fem_refine_solver.update_params(mode_cycle=('flow',), rounds=1)
 
 
-def _print_results_table(rows):
-    col_w = (30, 28, 10, 12, 10)
-    header_fmt = f"{{:<{col_w[0]}}} {{:<{col_w[1]}}} {{:>{col_w[2]}}} {{:>{col_w[3]}}} {{:>{col_w[4]}}}"
-    sep = ' '.join(['-' * w for w in col_w])
-    print(header_fmt.format('instance', 'method', 'time(s)', 'cut', 'imbalance'))
-    print(sep)
-    for row in rows:
-        print(
-            header_fmt.format(
-                row['instance'],
-                row['method'],
-                f"{row['time_s']:.4f}",
-                f"{row['cut']:.4f}",
-                f"{row['imbalance']:.6f}",
-            )
-        )
-
-
-def _print_result_row(row):
-    col_w = (30, 28, 10, 12, 10)
-    header_fmt = f"{{:<{col_w[0]}}} {{:<{col_w[1]}}} {{:>{col_w[2]}}} {{:>{col_w[3]}}} {{:>{col_w[4]}}}"
-    print(
-        header_fmt.format(
-            row['instance'],
-            row['method'],
-            f"{row['time_s']:.4f}",
-            f"{row['cut']:.4f}",
-            f"{row['imbalance']:.6f}",
-        ),
-        flush=True,
+def _build_pubo_result(pubo_obj, num_coarse_nodes, q_ways):
+    """Helper: run FEM with a custom PUBO objective and return the assignment."""
+    dummy_matrix = torch.zeros((num_coarse_nodes, num_coarse_nodes))
+    case = FEM()
+    case.set_up_problem(
+        num_coarse_nodes, 0, 'customize', dummy_matrix, q=q_ways,
+        customize_expected_func=pubo_obj.expectation,
+        customize_infer_func=pubo_obj.inference,
     )
-
-
-def run_kahypar_like_multilevel(
-    clique_graph_local,
-    hyperedges_local,
-    num_nodes_local,
-    q_local,
-    coarsen_to=500,
-    verbose=False,
-    use_lsh=False,
-):
-    """Run KaHyPar-like multilevel coarsening with optional LSH preprocessing."""
-    stage_t0 = time.time()
-    res = shared_kahypar_like_coarsen(
-        hyperedges_local,
-        num_nodes_local,
-        q=q_local,
-        coarsen_to=max(10, int(coarsen_to)),
-        verbose=verbose,
-        use_lsh=use_lsh,
-    )
-    _log(
-        (
-            f"[kahyper_like] shared_kahypar_like_coarsen: "
-            f"n={num_nodes_local} -> {len(res['coarse_groups'])}, "
-            f"nnz={int(res['coarse_graph']._nnz()) if res['coarse_graph'].is_sparse else 0}, "
-            f"time={time.time() - stage_t0:.4f}s"
-        ),
-        verbose,
-    )
-
-    return (
-        res['coarse_graph'],
-        res['coarse_node_weights'],
-        res['coarse_groups'],
-        res['original_to_coarse'],
-        res['initial_assignment'],
-    )
-
-
-def _compute_summary(final_assignment, hyperedges, q_ways):
-    fem_cut_value, _ = evaluate_kahypar_cut_value(final_assignment, hyperedges, [1.0] * len(hyperedges))
-    counts = np.bincount(final_assignment, minlength=q_ways)
-    ideal = len(final_assignment) / q_ways
-    max_imbalance = float(np.max(np.abs(counts - ideal) / ideal)) if ideal > 0 else 0.0
-    return float(fem_cut_value), max_imbalance
-
-
-def _parse_run_label(run_label):
-    if '[' not in run_label or not run_label.endswith(']'):
-        return run_label, None
-    method_name, submode = run_label[:-1].split('[', 1)
-    return method_name, submode
+    case.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=q_ways, manual_grad=False)
+    configs, results = case.solve()
+    return configs[0].argmax(dim=1).cpu().numpy()
 
 
 def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways, verbose=False):
     partition_method, submode = _parse_run_label(run_label)
     display_label = run_label
     fem_mode = submode or 'fem_as_hem'
-    use_lsh = submode == 'LSH'
+    use_lsh_flag = submode == 'LSH'
     start_time = time.time()
     log = lambda msg: _log(msg, verbose)
 
     log(f"Loading {instance}...")
     log(f"====== Running {display_label} ======")
 
+    # ── Direct FEM on clique-expanded graph ───────────────────────────────
     if partition_method == 'direct_fem':
         graph_for_fem = clique_graph
         node_weights_for_fem = torch.ones(num_nodes, dtype=torch.float32)
@@ -200,6 +146,7 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
         best_config = config[optimal_inds[0]]
         final_assignment = best_config.argmax(dim=1).cpu().numpy()
 
+    # ── Direct PUBO on hypergraph ─────────────────────────────────────────
     elif partition_method == 'pubo_direct':
         pubo_obj = PUBOObjective(
             hyperedges,
@@ -230,152 +177,87 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
         best_config = config[2] if len(config) > 2 else config[0]
         final_assignment = best_config.argmax(dim=1).cpu().numpy()
 
-    elif partition_method in ['coarsen_fem_refine_kahypar', 'coarsen_kahypar_refine', 'kahyper_like', 'pubo_coarsen', 'pubo_q4_explicit', 'pubo_implicit']:
+    # ── Multi-level methods (coarsen → initial partition → refine) ────────
+    elif partition_method in ['coarsen_fem_refine_kahypar', 'coarsen_kahypar_refine',
+                               'kahyper_like', 'pubo_coarsen',
+                               'pubo_q4_explicit', 'pubo_implicit']:
+
+        # --- Phase 1: Coarsen via solver (same coarse result for all methods) ---
+        _kahypar_solver.set_param('use_lsh', use_lsh_flag)
+        res = _kahypar_solver.coarsen(hyperedges, num_nodes, q_ways)
+        coarse_hyperedges = res['coarse_hyperedges']
+        coarse_node_weights = res['coarse_node_weights']
+        coarse_groups = res['coarse_groups']
+        original_to_coarse = res['original_to_coarse']
+        num_coarse_nodes = len(coarse_groups)
+        log(f"Coarsening took: {time.time() - start_time:.4f}s, "
+            f"coarse_nodes={num_coarse_nodes}")
+
+        # --- Phase 2: Initial partition on coarse graph ---
         if partition_method in ['coarsen_kahypar_refine', 'kahyper_like']:
-            coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, initial_assignment = run_kahypar_like_multilevel(
-                clique_graph,
-                hyperedges,
-                num_nodes,
-                q_ways,
-                coarsen_to=30,
-                verbose=verbose,
-                use_lsh=use_lsh,
+            initial_assignment = _kahypar_solver.initial_partition_greedy(
+                coarse_hyperedges, coarse_node_weights, q_ways,
             )
-            num_coarse_nodes = coarse_graph.shape[0]
-            log(f"KaHyPar-like coarse partitioning took: {time.time() - start_time:.4f} seconds")
+
         elif partition_method == 'coarsen_fem_refine_kahypar':
-            shared_res = shared_fem_matching_coarsen(
-                hyperedges,
-                num_nodes,
-                q=q_ways,
-                coarsen_to=500,
-                num_trials=num_trials,
-                num_steps=num_steps,
-                dev=dev,
-                verbose=verbose,
-                fem_mode=fem_mode,
+            initial_assignment = _fem_solver.initial_partition(
+                coarse_hyperedges, coarse_node_weights, q_ways,
             )
-            coarse_graph = shared_res['coarse_graph']
-            coarse_node_weights = shared_res['coarse_node_weights']
-            coarse_groups = shared_res['coarse_groups']
-            original_to_coarse = shared_res['original_to_coarse']
-            initial_assignment = shared_res['initial_assignment']
-            num_coarse_nodes = coarse_graph.shape[0]
-            log(f"Shared FEM matching coarsening took: {time.time() - start_time:.4f} seconds")
-        else:
-            coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = coarsen_graph_by_matching(
-                clique_graph,
-                node_weights=torch.ones(num_nodes, dtype=torch.float32),
-                coarsen_to=500,
+
+        else:  # pubo_coarsen, pubo_q4_explicit, pubo_implicit
+            coarse_graph, coarse_node_weights, coarse_groups, original_to_coarse, _ = (
+                coarsen_graph_by_matching(
+                    clique_graph,
+                    node_weights=torch.ones(num_nodes, dtype=torch.float32),
+                    coarsen_to=coarsen_to,
+                )
             )
             num_coarse_nodes = coarse_graph.shape[0]
+            coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
+            initial_assignment = None  # will be filled by PUBO below
 
         use_kahypar_refine = False
         if partition_method == 'coarsen_kahypar_refine' and HAS_KAHYPAR:
-            log("Using KaHyPar for refinement when available (will use FEM for coarse initial assignment).")
+            log("Using KaHyPar for refinement (greedy initial assignment).")
             use_kahypar_refine = True
         elif partition_method == 'coarsen_kahypar_refine' and not HAS_KAHYPAR:
-            log("KaHyPar is requested but not installed. Falling back to FEM on the coarsened graph (coarsen_fem_refine).")
+            log("KaHyPar not installed. Falling back to FEM refinement.")
             partition_method = 'coarsen_fem_refine_kahypar'
 
-        if partition_method == 'pubo_coarsen':
-            log("Using PUBO as the primary solver on the coarsened graph...")
-            coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
+        if partition_method in ('pubo_coarsen', 'pubo_q4_explicit', 'pubo_implicit'):
+            if partition_method == 'pubo_coarsen':
+                log("Using PUBO as the primary solver on the coarsened graph...")
+                pubo_obj = PUBOObjective(
+                    coarse_hyperedges, [1.0] * len(coarse_hyperedges),
+                    q=q_ways, num_nodes=num_coarse_nodes,
+                    node_weights=coarse_node_weights, imbalance_weight=5.0,
+                    obj_type='cut_net', max_degree=5,
+                )
+            elif partition_method == 'pubo_q4_explicit':
+                log("Using Explicit q=4 PUBO on the coarsened graph...")
+                from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut_explicit
+                pubo_obj = make_q4_pubo_object(
+                    coarse_hyperedges, coarse_node_weights,
+                    expected_hyperbmincut_explicit, num_coarse_nodes, q_ways,
+                )
+            else:  # pubo_implicit
+                log("Using implicit q=4 PUBO on the coarsened graph...")
+                from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut
+                pubo_obj = make_q4_pubo_object(
+                    coarse_hyperedges, coarse_node_weights,
+                    expected_hyperbmincut, num_coarse_nodes, q_ways,
+                )
 
-            pubo_obj = PUBOObjective(
-                coarse_hyperedges,
-                [1.0] * len(coarse_hyperedges),
-                q=q_ways,
-                num_nodes=num_coarse_nodes,
-                node_weights=coarse_node_weights,
-                imbalance_weight=5.0,
-                obj_type='cut_net',
-                max_degree=5,
-            )
+            initial_assignment = _build_pubo_result(pubo_obj, num_coarse_nodes, q_ways)
+            log(f"PUBO partitioning took: {time.time() - start_time:.4f} seconds")
 
-            dummy_matrix = torch.zeros((num_coarse_nodes, num_coarse_nodes))
-            case_bmincut = FEM()
-            case_bmincut.set_up_problem(
-                num_coarse_nodes,
-                0,
-                'customize',
-                dummy_matrix,
-                q=q_ways,
-                customize_expected_func=pubo_obj.expectation,
-                customize_infer_func=pubo_obj.inference,
-            )
-            case_bmincut.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=q_ways, manual_grad=False)
-            config, result = case_bmincut.solve()
-            best_config = config[0]
-            initial_assignment = best_config.argmax(dim=1).cpu().numpy()
-            log(f"Coarse PUBO partitioning took: {time.time() - start_time:.4f} seconds")
-
-        if partition_method == 'pubo_q4_explicit':
-            log("Using Explicit q=4 PUBO on the coarsened graph...")
-            coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
-
-            from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut_explicit
-
-            pubo_obj = make_q4_pubo_object(
-                coarse_hyperedges,
-                coarse_node_weights,
-                expected_hyperbmincut_explicit,
-                num_coarse_nodes,
-                q_ways,
-            )
-
-            dummy_matrix = torch.zeros((num_coarse_nodes, num_coarse_nodes))
-            case_bmincut = FEM()
-            case_bmincut.set_up_problem(
-                num_coarse_nodes,
-                0,
-                'customize',
-                dummy_matrix,
-                q=q_ways,
-                customize_expected_func=pubo_obj.expectation,
-                customize_infer_func=pubo_obj.inference,
-            )
-            case_bmincut.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=q_ways, manual_grad=False)
-            config, result = case_bmincut.solve()
-            best_config = config[0]
-            initial_assignment = best_config.argmax(dim=1).cpu().numpy()
-            log(f"Explicit q=4 PUBO partitioning took: {time.time() - start_time:.4f} seconds")
-
-        if partition_method == 'pubo_implicit':
-            log("Using implicit q=4 PUBO on the coarsened graph...")
-            from src.fem.customized_problem.hyper_bmincut import expected_hyperbmincut
-
-            coarse_hyperedges = build_coarse_hyperedges(hyperedges, original_to_coarse, num_nodes)
-            pubo_obj = make_q4_pubo_object(
-                coarse_hyperedges,
-                coarse_node_weights,
-                expected_hyperbmincut,
-                num_coarse_nodes,
-                q_ways,
-            )
-
-            dummy_matrix = torch.zeros((num_coarse_nodes, num_coarse_nodes))
-            case_bmincut = FEM()
-            case_bmincut.set_up_problem(
-                num_coarse_nodes,
-                0,
-                'customize',
-                dummy_matrix,
-                q=q_ways,
-                customize_expected_func=pubo_obj.expectation,
-                customize_infer_func=pubo_obj.inference,
-            )
-            case_bmincut.set_up_solver(num_trials, num_steps, anneal='lin', dev=dev, q=q_ways, manual_grad=False)
-            config, result = case_bmincut.solve()
-            best_config = config[0]
-            initial_assignment = best_config.argmax(dim=1).cpu().numpy()
-            log(f"Implicit q=4 PUBO partitioning took: {time.time() - start_time:.4f} seconds")
-
+        # --- Phase 3: Uncoarsen ---
         log("Step 3: Uncoarsening (Projection) back to original hypergraph...")
         step3_t0 = time.time()
         group_assignment = expand_coarse_labels(coarse_groups, initial_assignment, num_nodes)
         log(f"Step 3: expand_coarse_labels finished in {time.time() - step3_t0:.4f}s")
 
+        # --- Phase 4: Refine ---
         if partition_method in ('coarsen_kahypar_refine', 'coarsen_fem_refine_kahypar') and HAS_KAHYPAR and use_kahypar_refine:
             log("Step 3: Running KaHyPar refinement on the original hypergraph...")
             hyperedges_indices = []
@@ -384,7 +266,9 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
                 hyperedges_indices.extend(he)
                 hyperedges_ptrs.append(len(hyperedges_indices))
 
-            hg = kahypar.Hypergraph(num_nodes, len(hyperedges), hyperedges_indices, hyperedges_ptrs, q_ways, [1] * len(hyperedges), [1] * num_nodes)
+            hg = kahypar.Hypergraph(num_nodes, len(hyperedges), hyperedges_indices,
+                                     hyperedges_ptrs, q_ways,
+                                     [1] * len(hyperedges), [1] * num_nodes)
             for i in range(num_nodes):
                 hg.setNodePart(i, int(group_assignment[i]))
 
@@ -395,44 +279,27 @@ def run_partition_method(run_label, hyperedges, clique_graph, num_nodes, q_ways,
                 pass
             ctx.setK(q_ways)
             ctx.setEpsilon(0.05)
-
             kahypar.improvePartition(hg, ctx)
             final_assignment = np.array([hg.blockID(i) for i in range(num_nodes)], dtype=np.int64)
         else:
-            log("Step 3: Running Hybrid Refinement (Flow + MCTS + Evolution)...")
+            log("Step 3: Running Hybrid Refinement...")
             step3_refine_t0 = time.time()
             if partition_method == 'kahyper_like':
-                final_assignment = hybrid_refine_partition(
-                    group_assignment,
-                    hyperedges,
-                    mode_cycle=('flow', 'mcts', 'evolution'),
-                    rounds=3,
-                    q=q_ways,
-                    verbose=verbose,
+                final_assignment = _kahypar_refine_solver.refine(
+                    group_assignment, hyperedges, q_ways, verbose=verbose,
                 )
-                log(f"Step 3: hybrid_refine_partition finished in {time.time() - step3_refine_t0:.4f}s")
             elif partition_method == 'coarsen_fem_refine_kahypar':
-                final_assignment = hybrid_refine_partition(
-                    group_assignment,
-                    hyperedges,
-                    mode_cycle=('flow',),
-                    rounds=1,
-                    q=q_ways,
-                    verbose=verbose,
-                    flow_passes=2,
-                    skip_exploration_if_good=True,
+                final_assignment = _fem_refine_solver.refine(
+                    group_assignment, hyperedges, q_ways, verbose=verbose,
+                    flow_passes=2, skip_exploration_if_good=True,
                 )
-                log(f"Step 3: flow-only refinement finished in {time.time() - step3_refine_t0:.4f}s")
             else:
                 final_assignment = greedy_refine_hypergraph_incremental(
-                    group_assignment,
-                    hyperedges,
-                    [1.0] * len(hyperedges),
-                    q=q_ways,
-                    max_passes=5,
-                    max_imbalance=0.05,
+                    group_assignment, hyperedges,
+                    [1.0] * len(hyperedges), q=q_ways,
+                    max_passes=5, max_imbalance=0.05,
                 )
-                log(f"Step 3: greedy_refine_hypergraph_incremental finished in {time.time() - step3_refine_t0:.4f}s")
+            log(f"Step 3: refinement finished in {time.time() - step3_refine_t0:.4f}s")
     else:
         raise ValueError(f"Unknown partition method: {partition_method}")
 

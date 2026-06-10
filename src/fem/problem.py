@@ -218,6 +218,13 @@ class OptimizationProblem:
         if self.problem_type == 'bmincut':
             self.w2 = self.coupling_matrix.square().sum()
             self.imbalance_weight = self.imbalance_weight * self.w2 / (self.num_nodes**2)
+        if self.problem_type == 'bmincut_weighted':
+            self.w2 = _sparse_square_sum(self.coupling_matrix)
+            if self.node_weights is None:
+                balance_mass = float(self.num_nodes)
+            else:
+                balance_mass = float(torch.as_tensor(self.node_weights, dtype=self.coupling_matrix.dtype).sum())
+            self.imbalance_weight = 10 * self.imbalance_weight * self.w2 / (balance_mass**2)
         if self.problem_type == 'hyperbmincut':
             self.w2 = _sparse_square_sum(self.coupling_matrix)
             if self.node_weights is None:
@@ -250,6 +257,9 @@ class OptimizationProblem:
         elif self.problem_type == 'bmincut':
             return expected_bmincut(self.coupling_matrix, p) + \
                 self.imbalance_weight * imbalance_penalty(p)
+        elif self.problem_type == 'bmincut_weighted':
+            return expected_bmincut(self.coupling_matrix, p) + \
+                self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)
         elif self.problem_type == 'hyperbmincut':
             expect_loss = expected_hyperbmincut(self.coupling_matrix, p, self.hyperedge)
             balance_loss = self.imbalance_weight * weighted_imbalance_penalty(p, self.node_weights)
@@ -267,7 +277,7 @@ class OptimizationProblem:
     def manual_grad(self, p):
         if self.problem_type == 'maxcut':
             return manual_grad_maxcut(self.c * self.coupling_matrix, p, self.discretization)
-        elif self.problem_type == 'bmincut':
+        elif self.problem_type in ('bmincut', 'bmincut_weighted'):
             return manual_grad_bmincut(self.coupling_matrix, p, self.imbalance_weight, self.node_weights)
         elif self.problem_type == 'hyperbmincut':
             return manual_grad_hyperbmincut(self.coupling_matrix, p, self.U_max, self.L_min, self.imbalance_weight)
@@ -288,7 +298,7 @@ class OptimizationProblem:
             p = torch.vstack([pi for pi in p if torch.isnan(pi).sum() == 0])
         if self.problem_type == 'maxcut':
             config, result = infer_maxcut(self.coupling_matrix, p)
-        elif self.problem_type == 'bmincut' or self.problem_type == 'hyperbmincut':
+        elif self.problem_type in ('bmincut', 'bmincut_weighted', 'hyperbmincut'):
             config, result = infer_bmincut(self.coupling_matrix, p)
         elif self.problem_type == 'vertexcover':
             config, result = infer_qubo(self.coupling_matrix, p)

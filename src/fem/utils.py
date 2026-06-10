@@ -177,6 +177,83 @@ def read_hypergraph(file, index_start=1):
 
     return n, m, J_sparse
 
+def hyperedge_list_to_coupling(hyperedges, num_nodes, map_type='clique'):
+    """Convert a list of hyperedges to a pairwise coupling matrix.
+
+    Parameters
+    ----------
+    hyperedges : list of list of int
+        Each inner list contains vertex ids belonging to one hyperedge.
+    num_nodes : int
+        Number of vertices in the hypergraph.
+    map_type : str
+        ``'clique'`` — all-pairs expansion with 1/(k-1) weight (default).
+        ``'star'``   — one auxiliary node per hyperedge, all edges weight 1.
+
+    Returns
+    -------
+    J : torch.Tensor
+        Dense symmetric coupling matrix of shape ``(N, N)`` (clique) or
+        ``(N + M, N + M)`` (star).
+    """
+    if map_type == 'clique':
+        return _clique_expansion(hyperedges, num_nodes)
+    elif map_type == 'star':
+        return _star_expansion(hyperedges, num_nodes)
+    else:
+        raise ValueError(f"Unknown map_type: {map_type}")
+
+
+def _clique_expansion(hyperedges, num_nodes):
+    """All-pairs clique expansion — each hyperedge becomes a clique with 1/(k-1) weight."""
+    all_pairs = []
+    all_weights = []
+    for vertices in hyperedges:
+        if len(vertices) > 1:
+            pairs = torch.combinations(torch.tensor(vertices, dtype=torch.long), 2)
+            all_pairs.append(pairs)
+            pair_weight = 1.0 / (len(vertices) - 1)
+            all_weights.append(torch.full((pairs.shape[0],), pair_weight))
+
+    if not all_pairs:
+        return torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+
+    indices = torch.cat(all_pairs, dim=0)
+    weights_tensor = torch.cat(all_weights, dim=0)
+    indices_sym = torch.cat([indices, indices.flip(1)], dim=0)
+    weights_sym = torch.cat([weights_tensor, weights_tensor], dim=0)
+
+    sparse = torch.sparse_coo_tensor(
+        indices_sym.t(), weights_sym, (num_nodes, num_nodes),
+    ).coalesce()
+    max_val = torch.max(torch.abs(sparse.values()))
+    if max_val > 0:
+        sparse = torch.sparse_coo_tensor(
+            sparse.indices(), sparse.values() / max_val, sparse.shape,
+        ).coalesce()
+    return sparse.to_dense()
+
+
+def _star_expansion(hyperedges, num_nodes):
+    """Star expansion — one auxiliary node per hyperedge, all edges weight 1."""
+    m = len(hyperedges)
+    new_n = num_nodes + m
+    edge_pairs = []
+    for he_idx, vertices in enumerate(hyperedges):
+        center = num_nodes + he_idx
+        for v in vertices:
+            edge_pairs.append((v, center))
+            edge_pairs.append((center, v))
+
+    if not edge_pairs:
+        return torch.zeros((new_n, new_n), dtype=torch.float32)
+
+    edges_tensor = torch.tensor(edge_pairs, dtype=torch.long)
+    J = torch.zeros((new_n, new_n), dtype=torch.float32)
+    J[edges_tensor[:, 0], edges_tensor[:, 1]] = 1.0
+    return J
+
+
 def read_hypergraph_star(file, index_start=1):
     with open(file, "r") as f:
         l = f.readline()
