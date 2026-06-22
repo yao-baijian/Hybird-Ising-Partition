@@ -114,23 +114,23 @@ def greedy_initial_hypergraph_partition(
     if max_weight <= 0.0:
         max_weight = float("inf")
 
+    # ── Running tracking structures (avoids O(pins) inner loops) ──────────
+    # he_pins[e_idx][g] = how many assigned vertices of hyperedge e are in group g
+    # he_assigned[e_idx] = total assigned vertices in hyperedge e
+    he_pins = [np.zeros(k, dtype=np.int32) for _ in range(len(hyperedges))]
+    he_assigned = np.zeros(len(hyperedges), dtype=np.int32)
+
     def boundary_cost(v, g):
+        """O(deg(v)) cost via running tracking — no inner pin-scan."""
         cost = 0.0
         for e_idx in node_to_he[v]:
-            he = hyperedges[e_idx]
             w = float(hyperedge_weights[e_idx])
-            pins = 0
-            same = 0
-            for u in he:
-                au = assignment[u]
-                if au != -1:
-                    pins += 1
-                    if au == g:
-                        same += 1
-            if same == 0:
-                cost += w
-            elif same == pins:
-                cost -= w
+            ac = he_assigned[e_idx]
+            sg = he_pins[e_idx][g]
+            if sg == 0:
+                cost += w      # new group appears in this hyperedge
+            elif sg == ac:
+                cost -= w      # all assigned pins already in g
         return cost
 
     for v in order:
@@ -151,6 +151,11 @@ def greedy_initial_hypergraph_partition(
 
         assignment[v] = best_group
         group_weights[best_group] += float(vertex_weights[v])
+
+        # ── Update running tracking structures ──
+        for e_idx in node_to_he[v]:
+            he_pins[e_idx][best_group] += 1
+            he_assigned[e_idx] += 1
 
     return assignment
 

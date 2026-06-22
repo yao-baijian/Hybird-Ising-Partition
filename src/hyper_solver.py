@@ -140,6 +140,10 @@ class KahyparLikeSolver(HyperSolverBase):
 
         # ── HEM matching rounds ──────────────────────────────────────────
         hierarchy_stack: list[dict] = []
+
+        # Build incidence ONCE — updated statefully through the loop
+        vertex_to_edges, edge_vertices, edge_weights = _build_incidence(current_hyperedges, current_n)
+
         round_id = 0
         while current_n > target_coarse:
             round_id += 1
@@ -147,7 +151,8 @@ class KahyparLikeSolver(HyperSolverBase):
             matched = np.zeros(current_n, dtype=bool)
             partner = np.full(current_n, -1, dtype=np.int64)
 
-            vertex_to_edges, edge_vertices, edge_weights = _build_incidence(current_hyperedges, current_n)
+            # vertex_to_edges / edge_vertices are already up-to-date from
+            # the previous round's stateful merge — no rebuild needed.
             order = rng.permutation(current_n)
             pair_count = 0
 
@@ -197,7 +202,12 @@ class KahyparLikeSolver(HyperSolverBase):
                     new_groups.append(current_groups[u])
                 new_id += 1
 
+            # ── Combined pass: build new_hyperedges (hierarchy stack)   ──
+            #     AND simultaneously build updated vertex_to_edges so that
+            #     we never need _build_incidence again inside the loop.
             new_hyperedges = []
+            new_vertex_to_edges = [set() for _ in range(new_id)]
+
             for he in current_hyperedges:
                 mapped = []
                 seen = set()
@@ -208,18 +218,29 @@ class KahyparLikeSolver(HyperSolverBase):
                     mapped.append(int(nv))
                     seen.add(int(nv))
                 if len(mapped) > 1:
+                    eid = len(new_hyperedges)
                     new_hyperedges.append(mapped)
+                    for mv in mapped:
+                        new_vertex_to_edges[mv].add(eid)
 
             if new_id == current_n:
                 break
 
-            # ── Save hierarchy entry before transitioning to coarser level ──
+            # ── Save hierarchy entry before transitioning ──
             hierarchy_stack.append({
                 'hyperedges': [list(he) for he in current_hyperedges],
                 'groups': [list(g) for g in current_groups],
                 'remap': remap.copy(),
                 'num_nodes': current_n,
             })
+
+            # ── Update incidence statefully for the next round ──
+            # edge_vertices and new_hyperedges share the same structure
+            # (deduped vertex lists per hyperedge), so we can reuse the
+            # new_hyperedges list directly.
+            edge_vertices = new_hyperedges
+            vertex_to_edges = new_vertex_to_edges
+            # edge_weights stays at all-1.0 — unchanged by contraction
 
             current_hyperedges = new_hyperedges
             current_groups = new_groups
@@ -595,9 +616,17 @@ def _repair_balance_fast(assignment, hyperedges, max_imbalance=0.05, seed=None, 
 
 def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=None,
                     node_weights=None):
-    from src.partition.hyper_utils import evaluate_kahypar_cut_value
+    """Cut-aware balance repair using FM-style O(deg(v)) delta evaluation.
+
+    Pre-computes ``he_pins`` (shape ``[num_hyperedges, q]``) and ``node_to_he``,
+    then evaluates candidate moves via ``move_gain`` instead of calling
+    ``evaluate_kahypar_cut_value`` on a full copy of the assignment.
+    """
     rng = np.random.default_rng(seed)
     assignment = np.asarray(assignment, dtype=np.int64).copy()
+    num_nodes = len(assignment)
+    if num_nodes == 0:
+        return assignment
     if node_weights is not None:
         node_weights = np.asarray(node_weights, dtype=np.float64)
     q, counts, min_size, max_size = _balance_limits(
@@ -608,9 +637,25 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
         targets = np.full(q, total_weight / float(q) if q > 0 else 0.0, dtype=np.float64)
     else:
         targets = _target_counts(len(assignment), q).astype(np.float64)
-    if assignment.size == 0:
-        return assignment
     w = (lambda v: node_weights[v]) if node_weights is not None else (lambda v: 1.0)
+
+    # ── Build tracking structures (FM-style) ─────────────────────────────
+    he_pins = [np.zeros(q, dtype=np.int32) for _ in range(len(hyperedges))]
+    node_to_he = [[] for _ in range(num_nodes)]
+    for e_idx, he in enumerate(hyperedges):
+        for v in he:
+            if v < num_nodes:
+                he_pins[e_idx][assignment[v]] += 1
+                node_to_he[v].append(e_idx)
+
+    # ── Compute base cut ─────────────────────────────────────────────────
+    hyperedge_weights = [1.0] * len(hyperedges)
+    current_cut = 0.0
+    for e_idx in range(len(hyperedges)):
+        num_groups = int(np.count_nonzero(he_pins[e_idx]))
+        if num_groups > 1:
+            current_cut += (num_groups - 1) * hyperedge_weights[e_idx]
+
     for _ in range(max(1, assignment.size)):
         over = np.where(counts > targets)[0]
         under = np.where(counts < targets)[0]
@@ -623,20 +668,35 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
             vw = w(v)
             old = int(assignment[v])
             best_g = None
-            best_score = None
+            best_gain = -float('inf')
             for g in under:
+                g = int(g)
+                if g == old:
+                    continue
                 if counts[g] + vw > targets[g]:
                     continue
-                trial = assignment.copy()
-                trial[v] = int(g)
-                score = evaluate_kahypar_cut_value(trial, hyperedges, [1.0] * len(hyperedges))[0]
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_g = int(g)
+                # FM-style delta evaluation — O(deg(v)), no copy needed
+                gain = 0.0
+                for e_idx in node_to_he[v]:
+                    pins = he_pins[e_idx]
+                    wgt = hyperedge_weights[e_idx]
+                    if pins[old] == 1:
+                        gain += wgt
+                    if pins[g] == 0:
+                        gain -= wgt
+                if gain > best_gain:
+                    best_gain = gain
+                    best_g = g
             if best_g is not None:
+                # ── Apply move ──
                 assignment[v] = best_g
                 counts[old] -= vw
                 counts[best_g] += vw
+                current_cut -= best_gain
+                # ── Update tracking structures ──
+                for e_idx in node_to_he[v]:
+                    he_pins[e_idx][old] -= 1
+                    he_pins[e_idx][best_g] += 1
                 moved = True
                 break
         if not moved:

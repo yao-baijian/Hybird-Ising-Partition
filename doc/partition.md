@@ -85,14 +85,75 @@ Implements the full multi-level pipeline used by `kaffpa_kway` and `fem_multilev
 |----------|-------------|
 | `build_clique_expanded_graph(H, ...)` | Convert hyperedges to clique-expanded sparse graph |
 | `evaluate_kahypar_cut_value(assign, H, ...)` | Compute $(\lambda_e - 1) \cdot w_e$ cut metric |
-| `greedy_initial_hypergraph_partition(H, w, k, ...)` | Greedy balanced k-way hypergraph partition |
-| `greedy_refine_hypergraph_incremental(assign, H, ...)` | Local refinement for hypergraph |
+| `greedy_initial_hypergraph_partition(H, w, k, ...)` | Greedy balanced k-way hypergraph partition (uses running tracking for $O(\deg(v))$ cost evaluation) |
+| `greedy_refine_hypergraph_incremental(assign, H, ...)` | Local refinement for hypergraph with weighted-node support |
+
+## Hypergraph Solver Pipeline (`src/hyper_solver.py`)
+
+A self-contained hypergraph partitioning pipeline with three composable solver classes and a V-Cycle uncoarsening helper:
+
+| Class / Function | Role | Description |
+|------------------|------|-------------|
+| `KahyparLikeSolver` | Coarsening | HEM (heavy-edge matching) directly on hyperedges; optional LSH pre-coarsening; saves a `hierarchy_stack` of all intermediate levels |
+| `FemCoarsenSolver` | Initial partition | FEM or PUBO-based optimization on the coarsest level; supports clique/star expansion and configurable annealing schedules |
+| `HyperRefineSolver` | Refinement | FM (greedy incremental), MCTS rollouts, evolutionary search, or hybrid combinations; weighted-node-aware balance repair |
+| `vcycle_uncoarsen()` | Uncoarsening | Iterative projection + refinement through the saved hierarchy stack; extracts per-level node weights from groups; applies final pass on the original hypergraph |
+
+### Pipeline Stages
+
+```
+Original hypergraph
+    │
+    ▼  ┌─────────────────────────────────────┐
+    │  │ KahyparLikeSolver.coarsen()          │
+    │  │  - HEM matching rounds               │
+    │  │  - hierarchy_stack appended per round │
+    │  └─────────────────────────────────────┘
+    ▼
+Coarsest level  ◄── initial partition (greedy / FEM / PUBO)
+    │
+    │  ┌── V-Cycle ──────────────────────────┐
+    │  │  for each level (coarsest → finest): │
+    │  │    1. project via remap               │
+    │  │    2. HyperRefineSolver.refine()      │
+    │  │       (FM / MCTS / evolution / hybrid)│
+    │  └─────────────────────────────────────┘
+    ▼
+Original hypergraph  ◄── final refinement (unit weights)
+```
+
+### Weighted Balance Support
+
+All levels of the pipeline (partition summary, balance limits, balance repair, and refinement) accept an optional `node_weights` array. When provided, block sizes are computed as the sum of vertex weights rather than raw counts, enabling correct balance enforcement during V-Cycle uncoarsening where coarse vertices represent clusters of varying sizes.
+
+### Usage
+
+```python
+from src.hyper_solver import (
+    KahyparLikeSolver, FemCoarsenSolver,
+    HyperRefineSolver, vcycle_uncoarsen,
+)
+
+# 1. Coarsen (returns hierarchy_stack for V-cycle)
+res = kahypar_solver.coarsen(hyperedges, num_nodes, q)
+
+# 2. Initial partition on coarsest level
+fem_part = fem_solver.initial_partition(
+    res['coarse_hyperedges'], res['coarse_node_weights'], q,
+)
+
+# 3. V-Cycle uncoarsening + refinement
+final = vcycle_uncoarsen(
+    fem_part, res['hierarchy_stack'],
+    hyperedges, q, refine_solver,
+)
+```
 
 ## Pipeline Families
 
 ```
 DI (Direct):      fem / sbm
 DML (Direct ML):  kaffpa / metis / kahypar / kahip
-IECM (Init + Coarsen + Refine):  metis / kaffpa / kahypar / sbm+kaffpa
-MIER (ML Init + Ext. Refine):    metis / kaffpa / kahypar
+IECM (Init + Coarsen + Refine):  init_fem_refine_kaffpa / init_sbm_refine_kaffpa
+MIER (ML Init + Ext. Refine):    init_kaffpa_refine_fem
 ```

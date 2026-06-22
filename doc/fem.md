@@ -1,6 +1,6 @@
 # FEM — Flexible Entropy Minimization Solver
 
-**Location:** `src/fem/`
+**Location:** `src/fem/` and `src/hyper_solver.py` (`FemCoarsenSolver`)
 
 The FEM solver uses a **mean-field approximation** with entropy-based optimization
 to solve QUBO/Ising problems. It minimizes the free energy:
@@ -19,6 +19,7 @@ where $S[p]$ is the Shannon entropy of the marginal probabilities.
 | `initial_partition.py` | FEM-based k=2 initial partition for coarse graphs |
 | `cyclic_expansion.py` | Cyclic Expansion QUBO refinement for k-way partitioning |
 | `utils.py` | Graph file parsing utilities |
+| `hyper_solver.py` | `FemCoarsenSolver` — FEM/PUBO initial partition on coarsened **hypergraphs** (uses `FEM` internally) |
 
 ## Problem Types
 

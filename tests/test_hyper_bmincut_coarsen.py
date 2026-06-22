@@ -23,6 +23,8 @@ Configurable parameters at the top of this file:
 
 import sys
 from pathlib import Path
+import csv
+from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -39,18 +41,19 @@ import numpy as np
 
 # ── Configurable parameters ──────────────────────────────────────────────
 
-coarsen_to = 15          # target coarse nodes (all methods)
-q = 4                    # number of partitions
+coarsen_to = 100          # target coarse nodes (all methods)
+q = 8                    # number of partitions
 refine_passes = 6        # FM refinement passes
-verbose = False
-num_runs = 15            # outer trials (best result across all runs)
+verbose = True
+num_runs = 3            # outer trials (best result across all runs)
+dump_csv = False         # dump per-run + all-time-best CSV to build/
 
 # FemCoarsenSolver options (see class docstring for details)
 fem_method = 'fem'       # 'fem' or 'pubo'
 fem_map_type = 'star'  # 'clique' or 'star'
 fem_anneal = 'inverse'       # anneal schedule for FEM solver
-num_steps = 2000
-num_trials = 10
+num_steps = 3000
+num_trials = 1
 dev = 'cpu'
 
 # ── Solver instances ─────────────────────────────────────────────────────
@@ -84,7 +87,8 @@ refine_solver.update_params(
 
 
 def _load_hypergraph():
-    instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
+    # instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
+    instance = '../partition/full_benchmark_set/poisson3Db.mtx.hgr'
     hyperedges = parse_hypergraph_edges(str(instance))
     num_nodes = max((max(h) for h in hyperedges if h), default=-1) + 1
     return hyperedges, num_nodes, Path(instance).stem
@@ -176,6 +180,99 @@ def test_compare_initial_partition_modes():
     # ── Assertions ───────────────────────────────────────────────────────
     for v in (best_g['cut'], best_g['imb'], best_f['cut'], best_f['imb']):
         assert isinstance(v, (int, float)) and v >= 0
+
+    # ── CSV dump ─────────────────────────────────────────────────────────
+    if dump_csv:
+        build_dir = ROOT / 'build'
+        build_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        mode_cycle_str = str(refine_solver.get_param('mode_cycle', ('flow',)))
+
+        # Common metadata row
+        meta = {
+            'timestamp': timestamp,
+            'instance': instance_name,
+            'num_nodes': num_nodes,
+            'coarse_nodes': coarse_nodes,
+            'q': q,
+            'coarsen_to': coarsen_to,
+            'num_runs': num_runs,
+            'fem_method': fem_method,
+            'fem_map_type': fem_map_type,
+            'fem_anneal': fem_anneal,
+            'num_steps': num_steps,
+            'num_trials': num_trials,
+            'refine_passes': refine_passes,
+            'mode_cycle': mode_cycle_str,
+            'max_imbalance': 0.05,
+            'n_levels': n_levels,
+            'greedy_cut': best_g['cut'],
+            'greedy_imb': f"{best_g['imb']:.15f}",
+            'fem_cut': best_f['cut'],
+            'fem_imb': f"{best_f['imb']:.15f}",
+        }
+        fieldnames = list(meta.keys())
+
+        # ── CSV 1: Per-run result (timestamped, append) ──
+        csv_per_run = build_dir / f'hyper_bmincut_results_best_{timestamp}.csv'
+        with open(csv_per_run, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerow(meta)
+
+        # ── CSV 2: All-time best (merge logic) ──
+        csv_best = build_dir / 'bmincut_results_best.csv'
+        all_rows = []
+        replaced_g = replaced_f = False
+
+        if csv_best.exists():
+            with open(csv_best, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    all_rows.append(row)
+
+        # Look for existing entry with same instance + q
+        for row in all_rows:
+            if row.get('instance') == instance_name and int(row.get('q', 0)) == q:
+                # Greedy: overwrite if new result is better (lower cut)
+                if not replaced_g and float(row.get('greedy_cut', float('inf'))) > best_g['cut']:
+                    row['greedy_cut'] = best_g['cut']
+                    row['greedy_imb'] = f"{best_g['imb']:.15f}"
+                    row['greedy_timestamp'] = timestamp
+                    replaced_g = True
+                # FEM: overwrite independently
+                if not replaced_f and float(row.get('fem_cut', float('inf'))) > best_f['cut']:
+                    row['fem_cut'] = best_f['cut']
+                    row['fem_imb'] = f"{best_f['imb']:.15f}"
+                    row['fem_timestamp'] = timestamp
+                    replaced_f = True
+                # Update metadata if either was replaced
+                if replaced_g or replaced_f:
+                    row['timestamp'] = timestamp
+                    row['num_nodes'] = num_nodes
+                    row['coarse_nodes'] = coarse_nodes
+                    row['coarsen_to'] = coarsen_to
+                    row['num_runs'] = num_runs
+                    row['fem_method'] = fem_method
+                    row['fem_map_type'] = fem_map_type
+                    row['fem_anneal'] = fem_anneal
+                    row['num_steps'] = num_steps
+                    row['num_trials'] = num_trials
+                    row['refine_passes'] = refine_passes
+                    row['mode_cycle'] = mode_cycle_str
+                    row['max_imbalance'] = 0.05
+                    row['n_levels'] = n_levels
+                break
+
+        if not replaced_g and not replaced_f:
+            # No existing row found — append new
+            all_rows.append(meta)
+
+        # Write back all rows
+        with open(csv_best, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(all_rows)
 
 
 if __name__ == '__main__':
