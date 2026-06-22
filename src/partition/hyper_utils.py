@@ -162,16 +162,24 @@ def greedy_refine_hypergraph_incremental(
     q: int,
     max_passes: int = 5,
     max_imbalance: float = 0.05,
+    node_weights: list | np.ndarray = None,  # <-- Added node_weights
 ):
     """
     Incremental local refinement that only re-evaluates affected vertices
     (the moved vertex and its L1 hypergraph neighbors).
+    Now fully supports vertex weights for multilevel V-cycles.
     """
     assignment = assignment.copy()
     num_nodes = len(assignment)
 
     if hyperedge_weights is None:
         hyperedge_weights = [1.0] * len(hyperedges)
+
+    # Setup node weights
+    if node_weights is None:
+        node_weights = np.ones(num_nodes, dtype=float)
+    else:
+        node_weights = np.asarray(node_weights, dtype=float)
 
     he_pins = [np.zeros(q, dtype=np.int32) for _ in range(len(hyperedges))]
     node_to_he = [[] for _ in range(num_nodes)]
@@ -188,9 +196,13 @@ def greedy_refine_hypergraph_incremental(
                     if u != v and v < num_nodes:
                         vertex_neighbors[u].add(v)
 
-    group_sizes = np.bincount(assignment, minlength=q)
-    ideal_size = num_nodes / float(q)
-    max_size = ideal_size * (1.0 + max_imbalance)
+    # Initialize weighted block sizes
+    group_weights = np.zeros(q, dtype=float)
+    np.add.at(group_weights, assignment, node_weights)
+    
+    total_weight = float(node_weights.sum())
+    ideal_weight = total_weight / float(q) if q > 0 else 0.0
+    max_weight_limit = ideal_weight * (1.0 + max_imbalance)
 
     active = np.zeros(num_nodes, dtype=bool)
     queue = list(np.where(np.ones(num_nodes, dtype=bool))[0])
@@ -218,12 +230,15 @@ def greedy_refine_hypergraph_incremental(
             old_group = assignment[v]
             best_gain = 0.0
             best_group = old_group
+            vw = float(node_weights[v])
 
             for new_group in range(q):
                 if new_group == old_group:
                     continue
-                if group_sizes[new_group] + 1 > max_size:
+                # Strictly respect the weighted max size limit
+                if group_weights[new_group] + vw > max_weight_limit:
                     continue
+                
                 gain = move_gain(v, new_group)
                 if gain > best_gain:
                     best_gain = gain
@@ -231,8 +246,8 @@ def greedy_refine_hypergraph_incremental(
 
             if best_group != old_group:
                 assignment[v] = best_group
-                group_sizes[old_group] -= 1
-                group_sizes[best_group] += 1
+                group_weights[old_group] -= vw
+                group_weights[best_group] += vw
 
                 for e_idx in node_to_he[v]:
                     he_pins[e_idx][old_group] -= 1

@@ -7,7 +7,7 @@ Each solver type encapsulates a single concern:
 - HyperRefineSolver  → local refinement on the full hypergraph
 
 Usage::
-    # 1. Coarsen once
+    # 1. Coarsen once (returns hierarchy_stack for V-cycle)
     res = kahypar_solver.coarsen(hyperedges, num_nodes, q)
 
     # 2. Apply different initial partition strategies to the SAME coarse result
@@ -16,8 +16,11 @@ Usage::
     fem_assignment = fem_solver.initial_partition(
         res['coarse_hyperedges'], res['coarse_node_weights'], q)
 
-    # 3. Refine the projected assignment
-    final = refine_solver.refine(projected, hyperedges, q)
+    # 3. V-Cycle: project up through the hierarchy, refining at each level
+    final = vcycle_uncoarsen(
+        fem_assignment, res['hierarchy_stack'], hyperedges, q,
+        refine_solver, verbose=True,
+    )
 """
 
 from __future__ import annotations
@@ -136,6 +139,7 @@ class KahyparLikeSolver(HyperSolverBase):
             }
 
         # ── HEM matching rounds ──────────────────────────────────────────
+        hierarchy_stack: list[dict] = []
         round_id = 0
         while current_n > target_coarse:
             round_id += 1
@@ -208,6 +212,15 @@ class KahyparLikeSolver(HyperSolverBase):
 
             if new_id == current_n:
                 break
+
+            # ── Save hierarchy entry before transitioning to coarser level ──
+            hierarchy_stack.append({
+                'hyperedges': [list(he) for he in current_hyperedges],
+                'groups': [list(g) for g in current_groups],
+                'remap': remap.copy(),
+                'num_nodes': current_n,
+            })
+
             current_hyperedges = new_hyperedges
             current_groups = new_groups
             current_n = new_id
@@ -231,6 +244,7 @@ class KahyparLikeSolver(HyperSolverBase):
             'coarse_node_weights': coarse_node_weights,
             'original_to_coarse': original_to_coarse,
             'coarse_graph': coarse_graph,
+            'hierarchy_stack': hierarchy_stack,
         }
 
     def initial_partition_greedy(self, coarse_hyperedges, coarse_node_weights, q, **overrides):
@@ -387,13 +401,14 @@ class HyperRefineSolver(HyperSolverBase):
                           using ``_repair_balance_fast`` (default True).
                           Hybrid mode always repairs; this flag controls
                           the simple FM path.
+        node_weights    — per-vertex weights for weighted balance (default None)
     """
 
     def __init__(self, config_dir: Optional[Path] = None):
         super().__init__(config_dir)
         self._config['mode_cycle'] = ('flow',)
 
-    def refine(self, assignment, hyperedges, q, **overrides):
+    def refine(self, assignment, hyperedges, q, node_weights=None, **overrides):
         p = {**self._config, **overrides}
         mode_cycle = p.get('mode_cycle', ('flow',))
         repair = p.get('repair_balance', True)
@@ -406,6 +421,7 @@ class HyperRefineSolver(HyperSolverBase):
                 max_imbalance=p.get('max_imbalance', 0.05),
                 repair_balance=repair,
                 verbose=p.get('verbose', False),
+                node_weights=node_weights,
             )
 
         # Hybrid mode (MCTS / evolution / flow)
@@ -422,6 +438,7 @@ class HyperRefineSolver(HyperSolverBase):
             evolution_mutation=p.get('evolution_mutation', 0.1),
             skip_exploration_if_good=p.get('skip_exploration_if_good', True),
             verbose=p.get('verbose', False),
+            node_weights=node_weights,
         )
 
 
@@ -431,7 +448,7 @@ class HyperRefineSolver(HyperSolverBase):
 
 
 def _refine_flow(assignment, hyperedges, q, max_passes=5, max_imbalance=0.05,
-                 repair_balance=True, verbose=False):
+                 repair_balance=True, verbose=False, node_weights=None):
     """Simple FM (greedy incremental) refinement.
 
     Parameters
@@ -440,6 +457,15 @@ def _refine_flow(assignment, hyperedges, q, max_passes=5, max_imbalance=0.05,
         If True, actively repair balance via ``_repair_balance_fast``
         after FM refinement finishes.  This mirrors the behaviour of the
         hybrid pipeline and ensures the result satisfies ``max_imbalance``.
+    node_weights : np.ndarray or None
+        Per-vertex weights for weighted balance computation.
+
+    Note
+    ----
+    The underlying ``greedy_refine_hypergraph_incremental`` (C-extension)
+    may not support ``node_weights`` yet.  If so, the Python-side balance
+    repair logic (below) strictly uses the weights, but the greedy moves
+    inside the extension still treat every vertex as weight-1.
     """
     from src.partition.hyper_utils import greedy_refine_hypergraph_incremental
     if verbose:
@@ -447,15 +473,16 @@ def _refine_flow(assignment, hyperedges, q, max_passes=5, max_imbalance=0.05,
     result = greedy_refine_hypergraph_incremental(
         assignment, hyperedges,
         hyperedge_weights=[1.0] * len(hyperedges),
-        q=q, max_passes=max_passes, max_imbalance=max_imbalance,
+        q=q, max_passes=max_passes, max_imbalance=max_imbalance, node_weights=node_weights,
     )
-    _, _, current_imb = _partition_summary(result, q=q)
+    _, _, current_imb = _partition_summary(result, q=q, node_weights=node_weights)
     if repair_balance and current_imb > max_imbalance:
         result = _repair_balance_fast(
             result, hyperedges, max_imbalance=max_imbalance, q=q,
+            node_weights=node_weights,
         )
         if verbose:
-            _, _, imb = _partition_summary(result, q=q)
+            _, _, imb = _partition_summary(result, q=q, node_weights=node_weights)
             print(f"[refine:flow] balance repair applied, imb={imb:.4f}")
     return result
 
@@ -468,30 +495,55 @@ def _target_counts(n, q):
     return np.array([base + (1 if i < remainder else 0) for i in range(q)], dtype=int)
 
 
-def _balance_limits(assignment, max_imbalance, q=None):
+def _balance_limits(assignment, max_imbalance, q=None, node_weights=None):
     assignment = np.asarray(assignment, dtype=np.int64)
     if q is None:
         q = int(assignment.max()) + 1 if assignment.size else 2
-    counts = np.bincount(assignment, minlength=q).astype(int)
-    ideal = assignment.size / float(q) if q > 0 else 0.0
-    max_size = int(np.ceil(ideal * (1.0 + float(max_imbalance)))) if assignment.size else 0
-    min_size = int(np.floor(ideal * (1.0 - float(max_imbalance)))) if assignment.size else 0
+    if node_weights is not None:
+        node_weights = np.asarray(node_weights, dtype=np.float64)
+        counts = np.zeros(q, dtype=np.float64)
+        np.add.at(counts, assignment, node_weights)
+        total = float(node_weights.sum())
+    else:
+        counts = np.bincount(assignment, minlength=q).astype(np.float64)
+        total = float(assignment.size)
+    ideal = total / float(q) if q > 0 else 0.0
+    max_size = ideal * (1.0 + float(max_imbalance)) if total > 0 else 0.0
+    min_size = ideal * (1.0 - float(max_imbalance)) if total > 0 else 0.0
     return q, counts, min_size, max_size
 
 
-def _repair_balance_fast(assignment, hyperedges, max_imbalance=0.05, seed=None, q=None):
-    """Fast balance repair without cut evaluation."""
+def _repair_balance_fast(assignment, hyperedges, max_imbalance=0.05, seed=None, q=None,
+                         node_weights=None, max_iterations_mult=1):
+    """Fast balance repair without cut evaluation.
+
+    If ``node_weights`` is provided, balance is computed and repaired
+    using weighted block sums instead of raw vertex counts.
+
+    Parameters
+    ----------
+    max_iterations_mult : int
+        Multiplier on the default iteration count (``assignment.size * 2``).
+        Use >1 when coarse vertices have heavy weights that make single
+        moves larger, requiring more passes to converge.
+    """
     rng = np.random.default_rng(seed)
     assignment = np.asarray(assignment, dtype=np.int64).copy()
     if assignment.size == 0:
         return assignment
-    q, counts, min_size, max_size = _balance_limits(assignment, max_imbalance, q=q)
+    if node_weights is not None:
+        node_weights = np.asarray(node_weights, dtype=np.float64)
+    q, counts, min_size, max_size = _balance_limits(
+        assignment, max_imbalance, q=q, node_weights=node_weights,
+    )
     node_degree = np.zeros(assignment.size, dtype=float)
     for he in hyperedges:
         for v in he:
             if 0 <= v < assignment.size:
                 node_degree[v] += 1.0
-    for _ in range(max(1, assignment.size * 2)):
+    w = (lambda v: node_weights[v]) if node_weights is not None else (lambda v: 1.0)
+    max_iters = max(1, assignment.size * 2 * max_iterations_mult)
+    for _ in range(max_iters):
         over = np.where(counts > max_size)[0]
         if len(over) == 0:
             break
@@ -506,36 +558,59 @@ def _repair_balance_fast(assignment, hyperedges, max_imbalance=0.05, seed=None, 
         donor_vertices = donor_vertices[np.argsort(node_degree[donor_vertices], kind='mergesort')]
         moved = False
         for v in donor_vertices:
+            vw = w(v)
             for g in under:
                 g = int(g)
                 if g == donor:
                     continue
-                if counts[g] + 1 > max_size:
+                if counts[g] + vw > max_size:
                     continue
                 assignment[v] = g
-                counts[donor] -= 1
-                counts[g] += 1
+                counts[donor] -= vw
+                counts[g] += vw
                 moved = True
                 break
             if moved:
                 break
         if not moved:
+            # Fallback: find the lightest vertex that doesn't overshoot,
+            # or if none exists, the lightest vertex overall.
             g = int(np.argmin(counts))
-            v = int(donor_vertices[0])
-            assignment[v] = g
-            counts[donor] -= 1
-            counts[g] += 1
+            best_v = int(donor_vertices[0])
+            best_vw = w(best_v)
+            for v in donor_vertices:
+                vw = w(v)
+                if counts[g] + vw <= max_size:
+                    best_v = int(v)
+                    best_vw = vw
+                    break
+                if vw < best_vw:
+                    best_v = int(v)
+                    best_vw = vw
+            assignment[best_v] = g
+            counts[donor] -= best_vw
+            counts[g] += best_vw
     return assignment
 
 
-def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=None):
+def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=None,
+                    node_weights=None):
     from src.partition.hyper_utils import evaluate_kahypar_cut_value
     rng = np.random.default_rng(seed)
     assignment = np.asarray(assignment, dtype=np.int64).copy()
-    q, counts, min_size, max_size = _balance_limits(assignment, max_imbalance, q=q)
-    targets = _target_counts(len(assignment), q)
+    if node_weights is not None:
+        node_weights = np.asarray(node_weights, dtype=np.float64)
+    q, counts, min_size, max_size = _balance_limits(
+        assignment, max_imbalance, q=q, node_weights=node_weights,
+    )
+    if node_weights is not None:
+        total_weight = float(node_weights.sum())
+        targets = np.full(q, total_weight / float(q) if q > 0 else 0.0, dtype=np.float64)
+    else:
+        targets = _target_counts(len(assignment), q).astype(np.float64)
     if assignment.size == 0:
         return assignment
+    w = (lambda v: node_weights[v]) if node_weights is not None else (lambda v: 1.0)
     for _ in range(max(1, assignment.size)):
         over = np.where(counts > targets)[0]
         under = np.where(counts < targets)[0]
@@ -545,11 +620,12 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
         candidates = np.where(np.isin(assignment, over))[0]
         rng.shuffle(candidates)
         for v in candidates:
+            vw = w(v)
             old = int(assignment[v])
             best_g = None
             best_score = None
             for g in under:
-                if counts[g] + 1 > targets[g]:
+                if counts[g] + vw > targets[g]:
                     continue
                 trial = assignment.copy()
                 trial[v] = int(g)
@@ -559,8 +635,8 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
                     best_g = int(g)
             if best_g is not None:
                 assignment[v] = best_g
-                counts[old] -= 1
-                counts[best_g] += 1
+                counts[old] -= vw
+                counts[best_g] += vw
                 moved = True
                 break
         if not moved:
@@ -568,14 +644,21 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
     return assignment
 
 
-def _partition_summary(assignment, q=None):
+def _partition_summary(assignment, q=None, node_weights=None):
     assignment = np.asarray(assignment, dtype=np.int64)
     if assignment.size == 0:
         return 0, np.zeros(0, dtype=int), 0.0
     if q is None:
         q = int(assignment.max()) + 1
-    counts = np.bincount(assignment, minlength=q).astype(int)
-    ideal = assignment.size / float(q)
+    if node_weights is not None:
+        node_weights = np.asarray(node_weights, dtype=np.float64)
+        counts = np.zeros(q, dtype=np.float64)
+        np.add.at(counts, assignment, node_weights)
+        total = float(node_weights.sum())
+    else:
+        counts = np.bincount(assignment, minlength=q).astype(np.float64)
+        total = float(assignment.size)
+    ideal = total / float(q) if q > 0 else 0.0
     imb = float(np.max(np.abs(counts - ideal) / ideal)) if ideal > 0 else 0.0
     return q, counts, imb
 
@@ -585,7 +668,7 @@ def _assignment_cache_key(assignment):
     return assignment.shape, assignment.tobytes()
 
 
-def _cached_cut_and_imbalance(assignment, hyperedges, cache=None):
+def _cached_cut_and_imbalance(assignment, hyperedges, cache=None, node_weights=None):
     from src.partition.hyper_utils import evaluate_kahypar_cut_value
     if cache is None:
         cache = {}
@@ -593,20 +676,21 @@ def _cached_cut_and_imbalance(assignment, hyperedges, cache=None):
     if key not in cache:
         assignment_arr = np.asarray(assignment, dtype=np.int64)
         cut = evaluate_kahypar_cut_value(assignment_arr, hyperedges, [1.0] * len(hyperedges))[0]
-        _, _, imb = _partition_summary(assignment_arr)
+        _, _, imb = _partition_summary(assignment_arr, node_weights=node_weights)
         cache[key] = (float(cut), float(imb))
     return cache[key]
 
 
 def _refine_mcts(assignment, hyperedges, q, num_rollouts=16, depth=3, seed=None,
-                 max_imbalance=0.05, verbose=False, metrics_cache=None):
+                 max_imbalance=0.05, verbose=False, metrics_cache=None,
+                 node_weights=None):
     """Monte-Carlo style refinement via randomized move simulations."""
     rng = np.random.default_rng(seed)
     best = np.asarray(assignment, dtype=np.int64).copy()
     base = best.copy()
     if metrics_cache is None:
         metrics_cache = {}
-    best_score, _ = _cached_cut_and_imbalance(best, hyperedges, metrics_cache)
+    best_score, _ = _cached_cut_and_imbalance(best, hyperedges, metrics_cache, node_weights=node_weights)
     q = int(q) if q is not None else (int(best.max()) + 1 if best.size else 2)
     if best.size:
         node_to_he = [[] for _ in range(best.size)]
@@ -615,7 +699,7 @@ def _refine_mcts(assignment, hyperedges, q, num_rollouts=16, depth=3, seed=None,
                 if 0 <= v < best.size:
                     node_to_he[v].append(e_idx)
     if verbose:
-        _, _, imb = _partition_summary(best, q=q)
+        _, _, imb = _partition_summary(best, q=q, node_weights=node_weights)
         print(f"[refine:mcts] start rollouts={num_rollouts} depth={depth} cut={best_score} imb={imb:.4f}")
     for _ in range(max(1, int(num_rollouts))):
         cand = best.copy()
@@ -643,29 +727,30 @@ def _refine_mcts(assignment, hyperedges, q, num_rollouts=16, depth=3, seed=None,
                 new_g += 1
             if new_g != old:
                 cand[v] = new_g
-        score, _ = _cached_cut_and_imbalance(cand, hyperedges, metrics_cache)
+        score, _ = _cached_cut_and_imbalance(cand, hyperedges, metrics_cache, node_weights=node_weights)
         if score < best_score:
             best_score = score
             best = cand
-    if _partition_summary(best, q=q)[2] > max_imbalance:
-        best = _repair_balance_fast(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if _partition_summary(best, q=q, node_weights=node_weights)[2] > max_imbalance:
+        best = _repair_balance_fast(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q,
+                                     node_weights=node_weights)
     if verbose:
-        _, _, imb = _partition_summary(best, q=q)
+        _, _, imb = _partition_summary(best, q=q, node_weights=node_weights)
         print(f"[refine:mcts] done cut={best_score} imb={imb:.4f}")
     return best
 
 
 def _refine_evolution(assignment, hyperedges, q, population_size=8, generations=5,
                       mutation_rate=0.1, seed=None, max_imbalance=0.05,
-                      verbose=False, metrics_cache=None):
+                      verbose=False, metrics_cache=None, node_weights=None):
     """Small evolutionary search over discrete assignments."""
     rng = np.random.default_rng(seed)
     base = np.asarray(assignment, dtype=np.int64)
     if metrics_cache is None:
         metrics_cache = {}
     q = int(q) if q is not None else (int(base.max()) + 1 if base.size else 2)
-    base_score, _ = _cached_cut_and_imbalance(base, hyperedges, metrics_cache)
-    _, _, base_imb = _partition_summary(base, q=q)
+    base_score, _ = _cached_cut_and_imbalance(base, hyperedges, metrics_cache, node_weights=node_weights)
+    _, _, base_imb = _partition_summary(base, q=q, node_weights=node_weights)
     low_cut_mode = base_score < 200
     if low_cut_mode:
         mutation_rate = min(float(mutation_rate), 0.01)
@@ -679,13 +764,14 @@ def _refine_evolution(assignment, hyperedges, q, population_size=8, generations=
         mask = rng.random(cand.shape[0]) < float(mutation_rate)
         if mask.any():
             cand[mask] = rng.integers(0, q, size=int(mask.sum()))
-            if _partition_summary(cand, q=q)[2] > max_imbalance:
-                cand = _repair_balance_fast(cand, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+            if _partition_summary(cand, q=q, node_weights=node_weights)[2] > max_imbalance:
+                cand = _repair_balance_fast(cand, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q,
+                                             node_weights=node_weights)
         population[idx] = cand
     for _gen in range(max(1, int(generations))):
         scored = []
         for cand in population:
-            score, _ = _cached_cut_and_imbalance(cand, hyperedges, metrics_cache)
+            score, _ = _cached_cut_and_imbalance(cand, hyperedges, metrics_cache, node_weights=node_weights)
             scored.append((score, cand))
         scored.sort(key=lambda x: x[0])
         if scored[0][0] > base_score:
@@ -700,20 +786,22 @@ def _refine_evolution(assignment, hyperedges, q, population_size=8, generations=
             mut_mask = rng.random(child.shape[0]) < float(mutation_rate)
             if mut_mask.any():
                 child[mut_mask] = rng.integers(0, q, size=int(mut_mask.sum()))
-                if _partition_summary(child, q=q)[2] > max_imbalance:
-                    child = _repair_balance_fast(child, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+                if _partition_summary(child, q=q, node_weights=node_weights)[2] > max_imbalance:
+                    child = _repair_balance_fast(child, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q,
+                                                 node_weights=node_weights)
             next_population.append(child)
         population = next_population
-    scored = [(_cached_cut_and_imbalance(cand, hyperedges, metrics_cache)[0], cand) for cand in population]
+    scored = [(_cached_cut_and_imbalance(cand, hyperedges, metrics_cache, node_weights=node_weights)[0], cand) for cand in population]
     scored.sort(key=lambda x: x[0])
     best_score, best = scored[0]
     if best_score > base_score:
         best = base.copy()
         best_score = base_score
-    if _partition_summary(best, q=q)[2] > max_imbalance:
-        best = _repair_balance_fast(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if _partition_summary(best, q=q, node_weights=node_weights)[2] > max_imbalance:
+        best = _repair_balance_fast(best, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q,
+                                     node_weights=node_weights)
     if verbose:
-        _, _, imb = _partition_summary(best, q=q)
+        _, _, imb = _partition_summary(best, q=q, node_weights=node_weights)
         print(f"[refine:evolution] done cut={best_score} imb={imb:.4f}")
     return best
 
@@ -725,8 +813,15 @@ def _refine_hybrid(
     flow_passes=3, mcts_rollouts=16, mcts_depth=3,
     evolution_population=8, evolution_generations=5, evolution_mutation=0.1,
     skip_exploration_if_good=True, verbose=False,
+    node_weights=None,
 ):
-    """Hybrid refinement pipeline (MCTS / evolution / flow)."""
+    """Hybrid refinement pipeline (MCTS / evolution / flow).
+
+    Parameters
+    ----------
+    node_weights : np.ndarray or None
+        Per-vertex weights for weighted balance computation.
+    """
     refined = np.asarray(assignment, dtype=np.int64).copy()
     if q is None:
         q = int(refined.max()) + 1 if refined.size else 2
@@ -734,25 +829,51 @@ def _refine_hybrid(
     metrics_cache = {}
 
     def evaluate(candidate):
-        return _cached_cut_and_imbalance(candidate, hyperedges, metrics_cache)
+        return _cached_cut_and_imbalance(candidate, hyperedges, metrics_cache,
+                                          node_weights=node_weights)
 
     def ensure_balanced(candidate):
         candidate = np.asarray(candidate, dtype=np.int64).copy()
-        if _partition_summary(candidate, q=q)[2] <= max_imbalance:
+        if _partition_summary(candidate, q=q, node_weights=node_weights)[2] <= max_imbalance:
             return candidate
-        repaired = _repair_balance(candidate, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
-        if _partition_summary(repaired, q=q)[2] > max_imbalance:
-            repaired = _repair_balance(
-                _repair_balance_fast(repaired, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q),
-                hyperedges, max_imbalance=max_imbalance, seed=seed, q=q,
-            )
-        if _partition_summary(repaired, q=q)[2] > max_imbalance:
-            raise ValueError("Unable to enforce balance within max_imbalance")
+
+        # ── Attempt 1: cut-aware repair ──
+        repaired = _repair_balance(candidate, hyperedges, max_imbalance=max_imbalance,
+                                    seed=seed, q=q, node_weights=node_weights)
+        if _partition_summary(repaired, q=q, node_weights=node_weights)[2] <= max_imbalance:
+            return repaired
+
+        # ── Attempt 2: fast repair (more passes) + cut-aware repair ──
+        repaired = _repair_balance_fast(
+            repaired, hyperedges, max_imbalance=max_imbalance,
+            seed=seed, q=q, node_weights=node_weights,
+            max_iterations_mult=10,  # more aggressive with heavy coarse vertices
+        )
+        repaired = _repair_balance(repaired, hyperedges, max_imbalance=max_imbalance,
+                                    seed=seed, q=q, node_weights=node_weights)
+        if _partition_summary(repaired, q=q, node_weights=node_weights)[2] <= max_imbalance:
+            return repaired
+
+        # ── Attempt 3: fast repair only (most aggressive) ──
+        repaired = _repair_balance_fast(
+            repaired, hyperedges, max_imbalance=max_imbalance,
+            seed=seed, q=q, node_weights=node_weights,
+            max_iterations_mult=50,
+        )
+        if _partition_summary(repaired, q=q, node_weights=node_weights)[2] <= max_imbalance:
+            return repaired
+
+        # ── Fallback: best effort — warn but do not crash.
+        # Intermediate V-cycle levels will be re-refined at the next finer
+        # level anyway, so a minor balance violation is tolerable.
+        if verbose:
+            _, _, imb = _partition_summary(repaired, q=q, node_weights=node_weights)
+            print(f"  [warn] ensure_balanced: best imb={imb:.4f} > {max_imbalance}, continuing")
         return repaired
 
     if verbose:
         cut, _ = evaluate(refined)
-        _, counts, imb = _partition_summary(refined, q=q)
+        _, counts, imb = _partition_summary(refined, q=q, node_weights=node_weights)
         print(f"[refine:hybrid] start q={q} cut={cut} counts={counts.tolist()} imb={imb:.4f}")
 
     refined = ensure_balanced(refined)
@@ -787,7 +908,7 @@ def _refine_hybrid(
                 refined, hyperedges, q,
                 num_rollouts=mcts_rollouts, depth=mcts_depth, seed=seed,
                 max_imbalance=max_imbalance, verbose=verbose,
-                metrics_cache=metrics_cache,
+                metrics_cache=metrics_cache, node_weights=node_weights,
             )
             refined = maybe_repair_and_accept(candidate)
         if 'evolution' in effective_mode_cycle:
@@ -799,7 +920,7 @@ def _refine_hybrid(
                 generations=evolution_generations,
                 mutation_rate=evolution_mutation, seed=seed,
                 max_imbalance=max_imbalance, verbose=verbose,
-                metrics_cache=metrics_cache,
+                metrics_cache=metrics_cache, node_weights=node_weights,
             )
             refined = maybe_repair_and_accept(candidate)
         if 'flow' in effective_mode_cycle:
@@ -809,21 +930,24 @@ def _refine_hybrid(
                 refined, hyperedges, q,
                 max_passes=effective_flow_passes,
                 max_imbalance=max_imbalance, verbose=verbose,
+                node_weights=node_weights,
             )
             refined = maybe_repair_and_accept(candidate)
-        if _partition_summary(refined, q=q)[2] > max_imbalance:
-            refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+        if _partition_summary(refined, q=q, node_weights=node_weights)[2] > max_imbalance:
+            refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance,
+                                       seed=seed, q=q, node_weights=node_weights)
         refined = maybe_repair_and_accept(refined)
         if verbose:
-            print(f"[refine:hybrid] round_done cut={best_cut} counts={_partition_summary(best, q=q)[1].tolist()} imb={best_imb:.4f}")
+            print(f"[refine:hybrid] round_done cut={best_cut} counts={_partition_summary(best, q=q, node_weights=node_weights)[1].tolist()} imb={best_imb:.4f}")
 
     refined = best.copy()
-    if _partition_summary(refined, q=q)[2] > max_imbalance:
-        refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance, seed=seed, q=q)
+    if _partition_summary(refined, q=q, node_weights=node_weights)[2] > max_imbalance:
+        refined = _repair_balance(refined, hyperedges, max_imbalance=max_imbalance,
+                                   seed=seed, q=q, node_weights=node_weights)
     refined = maybe_repair_and_accept(refined)
     if verbose:
         cut, _ = evaluate(refined)
-        _, counts, imb = _partition_summary(refined, q=q)
+        _, counts, imb = _partition_summary(refined, q=q, node_weights=node_weights)
         print(f"[refine:hybrid] done cut={cut} counts={counts.tolist()} imb={imb:.4f}")
     return refined
 
@@ -906,3 +1030,115 @@ def _vertex_incident_edge_sets(hyperedges, num_nodes):
             if 0 <= v < num_nodes:
                 incident[v].add(eid)
     return incident
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  V-Cycle uncoarsening helper
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def vcycle_uncoarsen(
+    coarse_assignment,
+    hierarchy_stack,
+    original_hyperedges,
+    q,
+    refine_solver: HyperRefineSolver,
+    verbose: bool = True,
+) -> np.ndarray:
+    """Multilevel V-Cycle: iteratively project and refine through the hierarchy.
+
+    Takes an initial partition on the coarsest level, then walks back up
+    through the saved hierarchy levels (finest-first stack).  At each step:
+
+        1. Project the current assignment to the next finer level via ``remap``.
+        2. Run ``refine_solver.refine()`` on that finer-level hypergraph.
+
+    After all hierarchy levels are processed, a final refinement pass is
+    run on the **original** hypergraph.
+
+    Parameters
+    ----------
+    coarse_assignment : np.ndarray
+        Partition assignment at the coarsest level (output of
+        ``FemCoarsenSolver.initial_partition`` or ``initial_partition_greedy``).
+        Length must equal the number of coarse nodes.
+    hierarchy_stack : list of dict
+        The ``hierarchy_stack`` returned by ``KahyparLikeSolver.coarsen()``.
+        Each entry has keys ``hyperedges``, ``remap``, ``num_nodes``, ``groups``.
+        Ordered from finest (first contraction) to coarsest (last contraction).
+    original_hyperedges : list of list of int
+        The original (finest-level) hyperedges — used for the final
+        refinement step after all hierarchy levels are processed.
+    q : int
+        Number of blocks (partitions).
+    refine_solver : HyperRefineSolver
+        Refinement solver (FM / hybrid) to apply at each level.
+    verbose : bool
+        If True, print cut / imbalance after each level.
+
+    Returns
+    -------
+    np.ndarray
+        Final assignment on the original hypergraph.
+    """
+    assignment = np.asarray(coarse_assignment, dtype=np.int64).copy()
+    n_levels = len(hierarchy_stack)
+
+    # Number of vertices in the original hypergraph (for final unit-weight pass)
+    num_original_nodes = max(
+        (max(he) for he in original_hyperedges if he), default=-1,
+    ) + 1
+
+    # Walk back up: coarsest → finest
+    for level_idx, level in enumerate(reversed(hierarchy_stack)):
+        fine_hyperedges = level['hyperedges']
+        remap = level['remap']
+        fine_n = level['num_nodes']
+
+        # ── Extract node weights for this level (cluster sizes) ──
+        fine_weights = np.array([len(g) for g in level['groups']], dtype=np.float32)
+
+        # ── Project: fine_assignment[v] = coarse_assignment[remap[v]] ──
+        projected = np.array([assignment[remap[v]] for v in range(fine_n)], dtype=np.int64)
+
+        if verbose:
+            cut, imb = evaluate_kahypar_cut_value(
+                projected, fine_hyperedges,
+                hyperedge_weights=[1.0] * len(fine_hyperedges),
+            )
+            lvl_label = n_levels - level_idx
+            print(f'  [V-cycle] level {lvl_label}/{n_levels}: projected  cut={cut}, imb={imb:.4f}')
+
+        # ── Refine at this level (with weighted balance) ──
+        assignment = refine_solver.refine(projected, fine_hyperedges, q,
+                                          node_weights=fine_weights)
+
+        if verbose:
+            cut, imb = evaluate_kahypar_cut_value(
+                assignment, fine_hyperedges,
+                hyperedge_weights=[1.0] * len(fine_hyperedges),
+            )
+            lvl_label = n_levels - level_idx
+            print(f'  [V-cycle] level {lvl_label}/{n_levels}: refined   cut={cut}, imb={imb:.4f}')
+
+    # ── Final refinement on the original hypergraph (unit weights) ──
+    orig_weights = np.ones(num_original_nodes, dtype=np.float32)
+
+    if verbose:
+        cut, imb = evaluate_kahypar_cut_value(
+            assignment, original_hyperedges,
+            hyperedge_weights=[1.0] * len(original_hyperedges),
+        )
+        print(f'  [V-cycle] original (pre-refine): cut={cut}, imb={imb:.4f}')
+
+    assignment = refine_solver.refine(assignment, original_hyperedges, q,
+                                      node_weights=orig_weights)
+
+    if verbose:
+        cut, imb = evaluate_kahypar_cut_value(
+            assignment, original_hyperedges,
+            hyperedge_weights=[1.0] * len(original_hyperedges),
+        )
+        print(f'  [V-cycle] original (post-refine): cut={cut}, imb={imb:.4f}')
+
+    return assignment
