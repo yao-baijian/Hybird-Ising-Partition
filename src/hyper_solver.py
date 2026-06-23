@@ -326,7 +326,10 @@ class FemCoarsenSolver(HyperSolverBase):
             cw = np.concatenate([cw, np.ones(extra, dtype=np.float32)])
             coarse_node_weights = torch.tensor(cw, dtype=torch.float32)
 
-        num_coupling = int(torch.count_nonzero(coarse_coupling).item() // 2)
+        if coarse_coupling.is_sparse:
+            num_coupling = coarse_coupling._nnz() // 2
+        else:
+            num_coupling = int(torch.count_nonzero(coarse_coupling).item() // 2)
 
         # --- FEM path ---
         if method == 'fem':

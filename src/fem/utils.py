@@ -193,8 +193,8 @@ def hyperedge_list_to_coupling(hyperedges, num_nodes, map_type='clique'):
     Returns
     -------
     J : torch.Tensor
-        Dense symmetric coupling matrix of shape ``(N, N)`` (clique) or
-        ``(N + M, N + M)`` (star).
+        Coupling matrix of shape ``(N, N)`` (clique, dense) or
+        ``(N + M, N + M)`` (star, sparse COO).
     """
     if map_type == 'clique':
         return _clique_expansion(hyperedges, num_nodes)
@@ -235,7 +235,10 @@ def _clique_expansion(hyperedges, num_nodes):
 
 
 def _star_expansion(hyperedges, num_nodes):
-    """Star expansion — one auxiliary node per hyperedge, all edges weight 1."""
+    """Star expansion — one auxiliary node per hyperedge, all edges weight 1.
+
+    Returns a sparse COO tensor to avoid OOM when there are many hyperedges.
+    """
     m = len(hyperedges)
     new_n = num_nodes + m
     edge_pairs = []
@@ -246,12 +249,17 @@ def _star_expansion(hyperedges, num_nodes):
             edge_pairs.append((center, v))
 
     if not edge_pairs:
-        return torch.zeros((new_n, new_n), dtype=torch.float32)
+        return torch.sparse_coo_tensor(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=torch.float32),
+            (new_n, new_n),
+        ).coalesce()
 
     edges_tensor = torch.tensor(edge_pairs, dtype=torch.long)
-    J = torch.zeros((new_n, new_n), dtype=torch.float32)
-    J[edges_tensor[:, 0], edges_tensor[:, 1]] = 1.0
-    return J
+    values = torch.ones(edges_tensor.shape[0], dtype=torch.float32)
+    return torch.sparse_coo_tensor(
+        edges_tensor.t(), values, (new_n, new_n),
+    ).coalesce()
 
 
 def read_hypergraph_star(file, index_start=1):
