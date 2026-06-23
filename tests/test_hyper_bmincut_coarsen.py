@@ -41,18 +41,18 @@ import numpy as np
 
 # ── Configurable parameters ──────────────────────────────────────────────
 
-coarsen_to = 100          # target coarse nodes (all methods)
+coarsen_to = 50          # target coarse nodes (all methods)
 q = 8                    # number of partitions
 refine_passes = 6        # FM refinement passes
 verbose = True
-num_runs = 3            # outer trials (best result across all runs)
-dump_csv = False         # dump per-run + all-time-best CSV to build/
+num_runs = 10            # outer trials (best result across all runs)
+dump_csv = True         # dump per-run + all-time-best CSV to build/
 
 # FemCoarsenSolver options (see class docstring for details)
 fem_method = 'fem'       # 'fem' or 'pubo'
-fem_map_type = 'star'  # 'clique' or 'star'
+fem_map_type = 'clique'  # 'clique' or 'star'
 fem_anneal = 'inverse'       # anneal schedule for FEM solver
-num_steps = 3000
+num_steps = 1500
 num_trials = 1
 dev = 'cpu'
 
@@ -87,8 +87,8 @@ refine_solver.update_params(
 
 
 def _load_hypergraph():
-    # instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
-    instance = '../partition/full_benchmark_set/poisson3Db.mtx.hgr'
+    instance = '../partition/full_benchmark_set/powersim.mtx.hgr'
+    # instance = '../partition/full_benchmark_set/poisson3Db.mtx.hgr'
     hyperedges = parse_hypergraph_edges(str(instance))
     num_nodes = max((max(h) for h in hyperedges if h), default=-1) + 1
     return hyperedges, num_nodes, Path(instance).stem
@@ -210,6 +210,8 @@ def test_compare_initial_partition_modes():
             'greedy_imb': f"{best_g['imb']:.15f}",
             'fem_cut': best_f['cut'],
             'fem_imb': f"{best_f['imb']:.15f}",
+            'greedy_timestamp': '',
+            'fem_timestamp': '',
         }
         fieldnames = list(meta.keys())
 

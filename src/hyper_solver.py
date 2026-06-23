@@ -643,7 +643,7 @@ def _repair_balance(assignment, hyperedges, max_imbalance=0.05, seed=None, q=Non
     w = (lambda v: node_weights[v]) if node_weights is not None else (lambda v: 1.0)
 
     # ── Build tracking structures (FM-style) ─────────────────────────────
-    he_pins = [np.zeros(q, dtype=np.int32) for _ in range(len(hyperedges))]
+    he_pins = np.zeros((len(hyperedges), q), dtype=np.int32)
     node_to_he = [[] for _ in range(num_nodes)]
     for e_idx, he in enumerate(hyperedges):
         for v in he:
@@ -764,24 +764,22 @@ def _refine_mcts(assignment, hyperedges, q, num_rollouts=16, depth=3, seed=None,
     if verbose:
         _, _, imb = _partition_summary(best, q=q, node_weights=node_weights)
         print(f"[refine:mcts] start rollouts={num_rollouts} depth={depth} cut={best_score} imb={imb:.4f}")
+
+    # Calculate boundary vertices ONCE before rollouts begin
+    boundary_vertices = []
+    for v in range(best.size):
+        for e_idx in node_to_he[v]:
+            if len(set(best[u] for u in hyperedges[e_idx] if 0 <= u < best.size)) > 1:
+                boundary_vertices.append(v)
+                break
+
+    if not boundary_vertices:
+        return best
+
+    boundary_vertices = np.asarray(boundary_vertices, dtype=np.int64)
+
     for _ in range(max(1, int(num_rollouts))):
         cand = best.copy()
-        boundary_vertices = []
-        for v in range(cand.size):
-            incident = node_to_he[v]
-            if not incident:
-                continue
-            parts = set()
-            for e_idx in incident:
-                for u in hyperedges[e_idx]:
-                    if 0 <= u < cand.size:
-                        parts.add(int(cand[u]))
-                if len(parts) > 1:
-                    boundary_vertices.append(v)
-                    break
-        if not boundary_vertices:
-            break
-        boundary_vertices = np.asarray(sorted(set(boundary_vertices)), dtype=np.int64)
         for _step in range(max(1, int(depth))):
             v = int(boundary_vertices[int(rng.integers(0, boundary_vertices.size))])
             old = int(cand[v])

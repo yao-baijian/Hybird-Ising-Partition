@@ -224,7 +224,7 @@ class OptimizationProblem:
                 balance_mass = float(self.num_nodes)
             else:
                 balance_mass = float(torch.as_tensor(self.node_weights, dtype=self.coupling_matrix.dtype).sum())
-            self.imbalance_weight = 15 * self.imbalance_weight * self.w2 / (balance_mass**2)
+            self.imbalance_weight = 30 * self.imbalance_weight * self.w2 / (balance_mass**2)
         if self.problem_type == 'hyperbmincut':
             self.w2 = _sparse_square_sum(self.coupling_matrix)
             if self.node_weights is None:

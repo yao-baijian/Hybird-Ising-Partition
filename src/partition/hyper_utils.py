@@ -29,8 +29,7 @@ def evaluate_kahypar_cut_value(assignment: np.ndarray, hyperedges: list, hypered
     for hyperedge, weight in zip(hyperedges, hyperedge_weights):
         groups_in_hyperedge = set()
         if len(hyperedge) > 1:
-            for vertex in hyperedge:
-                groups_in_hyperedge.add(assignment[vertex])
+            groups_in_hyperedge = set(assignment[vertex] for vertex in hyperedge)
         lambda_e = len(groups_in_hyperedge)
         if lambda_e > 1:
             total_cut_value += (lambda_e - 1) * weight
@@ -117,7 +116,7 @@ def greedy_initial_hypergraph_partition(
     # ── Running tracking structures (avoids O(pins) inner loops) ──────────
     # he_pins[e_idx][g] = how many assigned vertices of hyperedge e are in group g
     # he_assigned[e_idx] = total assigned vertices in hyperedge e
-    he_pins = [np.zeros(k, dtype=np.int32) for _ in range(len(hyperedges))]
+    he_pins = np.zeros((len(hyperedges), k), dtype=np.int32)
     he_assigned = np.zeros(len(hyperedges), dtype=np.int32)
 
     def boundary_cost(v, g):
@@ -186,7 +185,7 @@ def greedy_refine_hypergraph_incremental(
     else:
         node_weights = np.asarray(node_weights, dtype=float)
 
-    he_pins = [np.zeros(q, dtype=np.int32) for _ in range(len(hyperedges))]
+    he_pins = np.zeros((len(hyperedges), q), dtype=np.int32)
     node_to_he = [[] for _ in range(num_nodes)]
     vertex_neighbors = [set() for _ in range(num_nodes)]
 
