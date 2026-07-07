@@ -1,8 +1,8 @@
 """Hybrid Ising Partition — src package root.
 
-Solvers (FEM, SBM, QIS3) are provided by the ``qubo-solver`` submodule
-at ``lib/qubo-solver/``.  This ``__init__`` adds it to the module search
-path so shim imports in ``src/fem/``, ``src/sbm/`` etc. work transparently.
+Solvers (FEM, SBM) are provided by the ``qubo-solver`` submodule
+at ``lib/qubo-solver/``.  This ``__init__`` adds it to ``sys.path`` so
+imports like ``from fem import FemSolver`` work transparently.
 """
 
 import sys

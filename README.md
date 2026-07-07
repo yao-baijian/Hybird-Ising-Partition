@@ -13,19 +13,17 @@ A Python library for solving graph and hypergraph partition problems using the *
 
 ## Solvers
 
-### Normal Graph Solvers
+QUBO/Ising solvers (FEM, SBM) are provided by the external
+**[qubo-solver](https://github.com/yao-baijian/qubo-solver)** submodule,
+cloned at ``lib/qubo-solver/``.  Import directly:
 
-| Solver | Source | Description |
-|--------|--------|-------------|
-| **FEM** | `src/fem/` | Mean-field entropy minimization with simulated annealing |
-| **SBM** | `src/sbm/` | Simulated Bifurcation — physics-inspired Ising machine solver |
-| **KaFFPa / KaHIP** | `src/partition/kaffpa_multiway.py` | External Karlsruhe Fast Flow Partitioner (wrapper) |
-| **METIS** | `src/partition/refine.py` | External METIS multi-level partitioner (wrapper) |
-| **Cyclic Expansion** | `src/fem/cyclic_expansion.py` | Cyclic Expansion FEM refinement (arXiv 2312.15467v1) |
+```python
+from fem import FemSolver       # mean-field annealing
+from sbm import SbmSolver       # simulated bifurcation
+from sbm import BaseSolver, BSBStrategy, GSBMixin  # composable API
+```
 
-### Hypergraph Solvers
-
-All in `src/hyper_solver.py`:
+### Hypergraph Solvers (built-in — ``src/hyper_solver.py``)
 
 | Solver | Role | Description |
 |--------|------|-------------|
@@ -33,13 +31,17 @@ All in `src/hyper_solver.py`:
 | **FemCoarsenSolver** | Initial partition | FEM or PUBO-based initial partition on a coarsened hypergraph |
 | **HyperRefineSolver** | Refinement | FM (greedy incremental), MCTS rollouts, evolutionary search, or hybrid combinations |
 
-These three solvers compose into a complete hypergraph pipeline (see below).
+These three solvers compose into a complete hypergraph pipeline.
+
+### KaFFPa / KaHIP, METIS
+
+External partitioner wrappers in ``src/partition/``.
 
 ## Pipelines
 
 ### Normal Graph Pipeline
 
-Multi-level partitioning combining coarsening, initial partitioning, and refinement via solver composition. Methods are registered in `src/method_registry.py` and dispatched by name:
+Multi-level partitioning combining coarsening, initial partitioning, and refinement via solver composition:
 
 | Method | Family | Init Solver | Refine Solver |
 |--------|--------|-------------|---------------|
@@ -53,21 +55,21 @@ Multi-level partitioning combining coarsening, initial partitioning, and refinem
 | `coarse_kaffpa_refine_fem` | MIER | KaFFPa (on coarse) | Cyclic Expansion FEM |
 
 Pipeline families:
-| Family | Meaning | Flow |
-|--------|---------|------|
-| **DI** | Direct | Solver runs directly on the full graph (no coarsening) |
-| **DML** | Direct Multi-Level | Native tool manages its own coarsening + refinement |
-| **IECM** | Init + External Coarsen + Refine | Coarsen → FEM/SBM init → External refine |
-| **MIER** | Multi-level Init + Ext. Refine | External init on coarse → Cyclic Expansion FEM refine |
+| Family | Meaning |
+|--------|---------|
+| **DI** | Direct solver on full graph (no coarsening) |
+| **DML** | Native tool manages its own coarsening + refinement |
+| **IECM** | Coarsen → FEM/SBM init → External refine |
+| **MIER** | External init on coarse → Cyclic Expansion FEM refine |
 
 ### Hypergraph Pipeline
 
 | Stage | Method | Description |
 |-------|--------|-------------|
-| **Coarsening** | HEM / LSH | Heavy-edge matching directly on hyperedges; optional MinHash/LSH pre-coarsening for large graphs. Intermediate levels are saved in a `hierarchy_stack`. |
-| **Initial partition** | Greedy / FEM / PUBO | Initial assignment on the coarsest level — either greedy (built into `KahyparLikeSolver`) or optimization-based (`FemCoarsenSolver`). |
-| **V-Cycle uncoarsening** | Iterative projection + refinement | Pop levels off the `hierarchy_stack` one-by-one. At each step: project the current assignment to the next finer level via the saved `remap` array, then refine immediately. |
-| **Refinement** | FM / MCTS / Evolution / Hybrid | Greedy incremental FM (flow), Monte-Carlo tree search rollouts, small evolutionary search, or any combination in a configurable `mode_cycle`. |
+| **Coarsening** | HEM / LSH | Heavy-edge matching directly on hyperedges; optional MinHash/LSH pre-coarsening. Intermediate levels saved in a `hierarchy_stack`. |
+| **Initial partition** | Greedy / FEM / PUBO | Initial assignment on the coarsest level. |
+| **V-Cycle uncoarsening** | Iterative projection + refinement | Pop levels off the `hierarchy_stack` one-by-one: project the current assignment to the next finer level, then refine immediately. |
+| **Refinement** | FM / MCTS / Evolution / Hybrid | Greedy incremental FM, Monte-Carlo tree search rollouts, small evolutionary search, or any combination in a configurable `mode_cycle`. |
 
 ```python
 # Usage:
@@ -86,35 +88,43 @@ compile_fem = True    # compile FEM Solver.iterate()
 compile_sbm = True    # compile SBM bsb_torch_batch step function
 ```
 
+## Latest Updates
+
+- **Repo cleanup**: Solver code (FEM, SBM, QIS3, DIGCIM) extracted to external
+  **[qubo-solver](https://github.com/yao-baijian/qubo-solver)** submodule.
+  ``src/fem/``, ``src/sbm/``, ``src/qis3/``, ``src/digcim/`` removed.
+  Import via ``from fem import FemSolver`` (automatically resolves via submodule).
+- **Unified SB**: strategy pattern + GSB/GGSB/Quantization mixins.
+- **Benchmark suite**: grid-search benchmark for all SB method combinations.
+- **Backward compatible**: ``sys.path`` setup in ``src/__init__.py`` handles
+  submodule discovery.
+
 ## Project Structure
 
 ```
 src/
-├── hyper_solver.py      # Hypergraph solver: KahyparLikeSolver,
-│                        #   FemCoarsenSolver, HyperRefineSolver, vcycle_uncoarsen
-├── solver_base.py       # Solver base classes (Fem, Sbm, Kaffpa, Metis, Cyclic)
-├── method_registry.py   # Pipeline method registry + JSON config loading
-├── fem/                 # Flexible Entropy Minimization solver
-├── partition/           # Multi-level partitioning (coarsen, refine, hyper_utils)
-├── sbm/                 # Simulated Bifurcation Machines
-├── qis3/                # Quantum-Inspired Solver v3
-├── digcim/              # Digital Co-Ising Machine experiments
-└── configs/             # Default solver JSON configs (fem, sbm, kaffpa, metis, cyclic)
+├── __init__.py          # Adds lib/qubo-solver/src to sys.path
+├── hyper_solver.py      # Hypergraph: KahyparLikeSolver, FemCoarsenSolver,
+│                        #   HyperRefineSolver, vcycle_uncoarsen
+└── partition/           # Multi-level partitioning (coarsen, refine, hyper_utils)
+    ├── coarsen.py, hyper_coarsen.py, hyper_refine.py
+    ├── hyper_utils.py, kaffpa_multiway.py, refine.py, utils.py
+    └── script/test_kahypar.py
+lib/                     # Git submodules
+└── qubo-solver/         # https://github.com/yao-baijian/qubo-solver
 tests/                   # Test suite and benchmarks
-├── test_hyper_bmincut_coarsen.py  # Hypergraph V-Cycle benchmark
-├── test_hyper_bmincut.py         # Hypergraph bmincut tests
-├── test_bmincut_coarsen.py       # Multi-level coarsening benchmarks
-├── test_bmincut.py               # Graph bmincut tests
-├── test_bmincut_base.py          # Base test utilities
-├── test_bmincut_gpu_boost.py     # GPU acceleration tests
-├── plot_results.py               # Result plotting (5 plot types)
-├── utils.py                      # Hypergraph I/O utilities
-├── config/                       # Working config copies (gitignored)
-└── build/                        # Benchmark CSV outputs
+├── test_hyper_bmincut_coarsen.py
+├── test_hyper_bmincut.py
+├── test_bmincut_coarsen.py
+├── test_bmincut.py
+├── test_bmincut_base.py
+├── test_bmincut_gpu_boost.py
+├── plot_results.py
+└── utils.py
 benchmarks/
-├── bmincut/                      # Balanced min-cut benchmarks
-├── maxcut/                       # Max-cut benchmarks (Gset, WK2000)
-└── maxsat/                       # Max-SAT benchmarks
+├── bmincut/             # Balanced min-cut benchmarks
+├── maxcut/              # Max-cut benchmarks (Gset, WK2000)
+└── maxsat/              # Max-SAT benchmarks
 doc/                    # Module documentation
 config/                 # Working solver configs (copied from src/configs/)
 build/                  # Benchmark result CSVs
