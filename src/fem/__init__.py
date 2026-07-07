@@ -1,2 +1,2 @@
-from .interface import FEM
-from .utils import read_graph
+"""FEM solver — re-exported from ``qubo-solver``."""
+from qubo_solver.fem import FemSolver  # noqa: F401

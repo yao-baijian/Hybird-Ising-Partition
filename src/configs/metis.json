@@ -1,4 +1,0 @@
-{
-    "description": "PyMetis graph partitioner",
-    "coarsen_to": 50
-}
